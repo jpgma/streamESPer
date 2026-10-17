@@ -37,7 +37,11 @@ static class Program
         int fps = AskInt("fps", OptionalInt(args, "--fps") ?? 24);
         FitMode fit = AskFit(OptionalFlag(args, "--fit"));
         bool dither = AskYes("Dither (s/N)", HasFlag(args, "--dither"));
-        return Build(input, output, fps, fit, dither, HasFlag(args, "--allow-over-budget"));
+        bool includeAudio = AskYes("Incluir áudio (S/n)", !HasFlag(args, "--no-audio"));
+        int sampleRate = OptionalInt(args, "--sample-rate") ?? AudioPcm.DefaultSampleRate;
+        if (includeAudio)
+            sampleRate = AskSampleRate(sampleRate);
+        return Build(input, output, fps, fit, dither, HasFlag(args, "--allow-over-budget"), sampleRate, includeAudio);
     }
 
     static ConvertRequest Parse(string[] args)
@@ -46,14 +50,15 @@ static class Program
         string output = OptionalFlag(args, "--output") ?? Path.ChangeExtension(input, ".w154");
         int fps = OptionalInt(args, "--fps") ?? 24;
         FitMode fit = ParseFit(OptionalFlag(args, "--fit") ?? "cover");
-        return Build(input, output, fps, fit, HasFlag(args, "--dither"), HasFlag(args, "--allow-over-budget"));
+        int sampleRate = OptionalInt(args, "--sample-rate") ?? AudioPcm.DefaultSampleRate;
+        return Build(input, output, fps, fit, HasFlag(args, "--dither"), HasFlag(args, "--allow-over-budget"), sampleRate, !HasFlag(args, "--no-audio"));
     }
 
     static void RejectUnknown(string[] args)
     {
         var known = new HashSet<string>(StringComparer.Ordinal)
         {
-            "--input", "--output", "--fps", "--fit", "--dither", "--allow-over-budget",
+            "--input", "--output", "--fps", "--fit", "--dither", "--allow-over-budget", "--sample-rate", "--no-audio",
         };
         for (int i = 0; i < args.Length; i++)
         {
@@ -62,7 +67,7 @@ static class Program
             string name = FlagName(args[i]);
             if (!known.Contains(name))
                 throw new W154Exception($"argumento desconhecido: {args[i]}");
-            if (name is "--dither" or "--allow-over-budget" || args[i].Contains('='))
+            if (name is "--dither" or "--allow-over-budget" or "--no-audio" || args[i].Contains('='))
                 continue;
             if (FlagValue(args, i) is null)
                 throw new W154Exception($"falta o valor de {name}.");
@@ -70,14 +75,15 @@ static class Program
         }
     }
 
-    static ConvertRequest Build(string input, string output, int fps, FitMode fit, bool dither, bool allowOverBudget)
+    static ConvertRequest Build(string input, string output, int fps, FitMode fit, bool dither, bool allowOverBudget, int sampleRate, bool includeAudio)
     {
         input = Unquote(input);
         output = Unquote(output);
         if (!File.Exists(input))
             throw new W154Exception($"arquivo não encontrado: {input}");
         _ = PictureContract.FrameUs(fps);
-        return new ConvertRequest(Path.GetFullPath(input), Path.GetFullPath(output), fps, fit, dither, allowOverBudget);
+        AudioPcm.RequireRate(sampleRate);
+        return new ConvertRequest(Path.GetFullPath(input), Path.GetFullPath(output), fps, fit, dither, allowOverBudget, sampleRate, includeAudio);
     }
 
     static string AskRequired(string label, string? current)
@@ -122,6 +128,18 @@ static class Program
         }
     }
 
+    static int AskSampleRate(int current)
+    {
+        while (true)
+        {
+            string text = Ask("Taxa de áudio", current.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int value)
+                && AudioPcm.IsRate(value))
+                return value;
+            Console.Error.WriteLine("use 16000, 24000 ou 48000.");
+        }
+    }
+
     static FitMode AskFit(string? current)
     {
         FitMode fallback = current is null ? FitMode.Cover : ParseFit(current);
@@ -163,10 +181,13 @@ static class Program
             w154
             w154 --input video.mp4 --output video.w154 --fps 24 --fit cover
             w154 --input video.mp4 --fit contain --dither --allow-over-budget
+            w154 --input video.mp4 --sample-rate 16000 --no-audio
             w154 selftest
 
             --fps                  inteiro de 1 a 60 (padrão 24)
             --dither               Floyd-Steinberg (padrão desligado)
+            --sample-rate          16000, 24000 ou 48000 (padrão 48000), mono s16le
+            --no-audio             não grava PCM, mesmo se a origem tiver áudio
             --allow-over-budget    sai 0 mesmo se o pior segundo passar de 16 Mbit/s
             """);
     }
@@ -222,7 +243,7 @@ static class Program
         if (eq >= 0)
             return arg[(eq + 1)..];
         string name = FlagName(arg);
-        if (name is "--dither" or "--allow-over-budget")
+        if (name is "--dither" or "--allow-over-budget" or "--no-audio")
             return "true";
         if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
             return null;

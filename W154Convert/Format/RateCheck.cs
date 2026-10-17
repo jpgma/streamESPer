@@ -20,13 +20,22 @@ static class RateCheck
     public static int Fragments(int bodyBytes) =>
         (bodyBytes + PictureContract.FragPayload - 1) / PictureContract.FragPayload;
 
-    public static RateReport Measure(int frameUs, IReadOnlyList<int> bodyBytes)
+    public static RateReport Measure(int frameUs, IReadOnlyList<int> bodyBytes, int sampleRate = 0, int sampleCount = 0)
     {
         if (bodyBytes.Count == 0)
             throw new W154Exception("sem quadros para a taxa.");
+        if (sampleCount > 0)
+            AudioPcm.RequireRate(sampleRate);
 
         long total = 0;
         int lastSecond = (int)(((long)(bodyBytes.Count - 1) * frameUs) / 1_000_000L);
+        if (sampleCount > 0)
+        {
+            int audioLast = (sampleCount - 1) / sampleRate;
+            if (audioLast > lastSecond)
+                lastSecond = audioLast;
+        }
+
         var buckets = new long[lastSecond + 1];
         for (int n = 0; n < bodyBytes.Count; n++)
         {
@@ -34,6 +43,20 @@ static class RateCheck
             total += udp;
             int second = (int)(((long)n * frameUs) / 1_000_000L);
             buckets[second] += udp;
+        }
+
+        if (sampleCount > 0)
+        {
+            int index = 0;
+            while (index < sampleCount)
+            {
+                int second = index / sampleRate;
+                int end = Math.Min(sampleCount, (second + 1) * sampleRate);
+                int udp = UdpBytes((end - index) * 2);
+                total += udp;
+                buckets[second] += udp;
+                index = end;
+            }
         }
 
         double worst = 0;

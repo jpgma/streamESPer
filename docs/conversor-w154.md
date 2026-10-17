@@ -1,6 +1,6 @@
 # Conversor `.w154`
 
-O `w154` transforma um vídeo qualquer no arquivo que um sender futuro transmite ao painel. O arquivo guarda índices de paleta, não RGB565. Áudio fica de fora.
+O `w154` transforma um vídeo qualquer no arquivo que um sender futuro transmite ao painel. O arquivo guarda índices de paleta, não RGB565. O PCM mono, quando a origem tem áudio, vai num bloco depois dos quadros.
 
 Os nomes de campo e de estrutura permanecem em inglês, como no contrato do painel.
 
@@ -74,7 +74,7 @@ Extensão `.w154`. Inteiros multi-byte são little-endian.
 | 16 | `frame_us` |
 | 20 | `frame_count` |
 | 24 | `flags` = 0 |
-| 28 | reserved = 0 |
+| 28 | `audio_offset` = 0, ou o offset do bloco de PCM |
 
 No byte 32 há `frame_count` offsets `u32`, cada um apontando para o `body_bytes` daquele quadro. O primeiro offset é `header_size + frame_count * 4`. Em seguida:
 
@@ -85,7 +85,17 @@ u8  body[body_bytes]
 
 `body_bytes` fica no arquivo. O body é o que o sender põe no ar. Um body maior que 58244 é recusado.
 
-Depois de gravar, o conversor relê o arquivo: magic, offsets, CRC, keyframes no múltiplo de `gop`, decode das bands e diferença real de cada delta. Se a verificação falha, o `.w154` é apagado.
+Se a origem tem um stream de áudio e `--no-audio` não foi pedido, o conversor grava PCM mono s16le depois do último quadro. `audio_offset` aponta para esse bloco. Sem áudio na origem, o campo fica 0 e o arquivo acaba no último body. A taxa é 16000, 24000 ou 48000. O padrão é 48000.
+
+```text
+timeline_us  = frame_count * frame_us
+sample_count = (timeline_us * sample_rate + 500000) / 1000000
+pcm_bytes    = sample_count * 2
+```
+
+Amostra 0 é o quadro 0. PCM mais curto termina em silêncio. PCM mais longo é cortado. O bloco tem 16 bytes (`pcm_bytes`, `sample_rate`, `channels` 1, `sample_format` 0, `crc32` do PCM) e em seguida as amostras little-endian. A extração é um segundo ffmpeg: `-map 0:a:0 -ac 1 -ar <taxa> -acodec pcm_s16le -f s16le`.
+
+Depois de gravar, o conversor relê o arquivo: magic, offsets, CRC, keyframes no múltiplo de `gop`, decode das bands, diferença real de cada delta e, se houver, o bloco de áudio. Se a verificação falha, o `.w154` é apagado.
 
 ## Rate check
 
@@ -96,7 +106,7 @@ frags     = ceil(body_bytes / 1456)
 udp_bytes = body_bytes + 16 * frags
 ```
 
-A média e o pior segundo (janela alinhada em `frame_us`) saem em Mbit/s.
+A média e o pior segundo (janela alinhada em `frame_us`) saem em Mbit/s. O PCM do mesmo segundo entra na soma: `ceil(bytes_do_segundo / 1456)` fragmentos, cada um com 16 bytes de cabeçalho. Um segundo cheio a 48000 Hz mono são 96000 bytes de amostra, 66 fragmentos e 97056 bytes UDP, cerca de 0,78 Mbit/s.
 
 | Pior segundo | Leitura |
 | --- | --- |
@@ -108,7 +118,7 @@ O arquivo é gravado mesmo acima de 16. Sem `--allow-over-budget`, o processo sa
 
 ## Uso
 
-Sem `--input`, o programa pergunta o arquivo, a saída, o fps, o `fit` e o dither.
+Sem `--input`, o programa pergunta o arquivo, a saída, o fps, o `fit`, o dither, se o áudio entra e a taxa.
 
 Num terminal, a conversão mostra uma barra com a porcentagem, os quadros feitos, o tempo decorrido e o tempo restante. A estimativa usa a duração que o ffmpeg lê na origem. Se essa duração não existir, a linha mostra só os quadros e o tempo decorrido.
 
@@ -116,7 +126,8 @@ Num terminal, a conversão mostra uma barra com a porcentagem, os quadros feitos
 w154
 w154 --input video.mp4 --output video.w154 --fps 24 --fit cover
 w154 --input video.mp4 --fit contain --dither --allow-over-budget
+w154 --input video.mp4 --sample-rate 16000 --no-audio
 w154 selftest
 ```
 
-O ffmpeg procurado é, nesta ordem, o `ffmpeg.exe` ao lado do programa, `tools/ffmpeg/win-x64/ffmpeg.exe` subindo diretórios, e o `PATH`. A build pinada e a licença estão em `tools/ffmpeg/PROVENIENCIA.txt`.
+O ffmpeg procurado é, nesta ordem, o `ffmpeg.exe` ao lado do programa, `tools/ffmpeg/win-x64/ffmpeg.exe` subindo diretórios, e o `PATH`. A build pinada e a licença estão em `tools/ffmpeg/PROVENIENCIA.txt`. Sem `--input`, o programa também pergunta a taxa de áudio (padrão 48000) e se o PCM entra no arquivo. `--sample-rate` aceita 16000, 24000 ou 48000. `--no-audio` deixa o arquivo só com vídeo.

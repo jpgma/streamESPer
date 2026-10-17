@@ -13,6 +13,7 @@ static class SelfTest
         CheckFit();
         CheckProgress();
         CheckFile();
+        CheckAudio();
         Console.WriteLine("selftest ok");
         return 0;
     }
@@ -161,6 +162,7 @@ static class SelfTest
             Check(verified.AsSpan().SequenceEqual(lengths), "verify relê os mesmos bodies");
 
             byte[] bytes = File.ReadAllBytes(path);
+            Check(bytes[28] == 0 && bytes[29] == 0 && bytes[30] == 0 && bytes[31] == 0, "vídeo sem áudio grava audio_offset 0");
             bytes[80] ^= 0xFF;
             string broken = path + ".bad";
             File.WriteAllBytes(broken, bytes);
@@ -184,6 +186,118 @@ static class SelfTest
             ushort entry0 = (ushort)(containBytes[palette] | (containBytes[palette + 1] << 8));
             Check(entry0 == 0, "contain grava palette[0] = 0");
             File.Delete(contained);
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    static void CheckAudio()
+    {
+        Check(AudioPcm.SampleCount(24, 41667, 48000) == 48000, "24 quadros a 48000 Hz");
+        Check(AudioPcm.SampleCount(24, 41667, 16000) == 16000, "24 quadros a 16000 Hz");
+        Check(RateCheck.Fragments(96000) == 66 && RateCheck.UdpBytes(96000) == 97056, "um segundo de 48000 Hz mono");
+
+        int videoUdp = RateCheck.UdpBytes(58244);
+        RateReport mixed = RateCheck.Measure(1_000_000, new[] { 58244 }, 48000, 48000);
+        double expected = (videoUdp + 97056) * 8.0 / 1_000_000.0;
+        Check(mixed.WorstSecond == 0 && mixed.WorstMbps == expected && mixed.AverageMbps == expected, "áudio soma no balde do vídeo");
+
+        var frame = new ushort[PictureContract.Pixels];
+        Array.Fill(frame, Rgb565.Pack(255, 0, 0));
+        int samples = AudioPcm.SampleCount(1, PictureContract.FrameUs(24), 48000);
+        var pcm = new byte[samples * 2];
+        for (int i = 0; i < pcm.Length; i++)
+            pcm[i] = (byte)i;
+
+        string path = Path.Combine(Path.GetTempPath(), "w154-audio-" + Guid.NewGuid().ToString("N") + ".w154");
+        try
+        {
+            using (var stream = new MemoryStream(pcm, writable: false))
+                Converter.EncodeFrames([frame], 24, contain: false, dither: false, path, stream, 48000);
+
+            byte[] file = File.ReadAllBytes(path);
+            uint audioOffset = ReadU32(file, 28);
+            Check(audioOffset + AudioPcm.HeaderBytes + (uint)pcm.Length == (uint)file.Length, "audio_offset no fim do vídeo");
+            Check(file.AsSpan((int)audioOffset + AudioPcm.HeaderBytes).SequenceEqual(pcm), "PCM roundtrip");
+            Check(ReadU32(file, (int)audioOffset + 12) == Crc32.Compute(pcm), "crc32 do PCM");
+
+            string padded = path + ".pad.w154";
+            var head = new byte[4];
+            pcm.AsSpan(0, 4).CopyTo(head);
+            using (var shortPcm = new MemoryStream(head))
+                Converter.EncodeFrames([frame], 24, contain: false, dither: false, padded, shortPcm, 48000);
+            byte[] padFile = File.ReadAllBytes(padded);
+            int padAt = (int)ReadU32(padFile, 28) + AudioPcm.HeaderBytes;
+            Check(padFile.AsSpan(padAt, 4).SequenceEqual(head), "PCM curto preserva o início");
+            Check(padFile[padAt + 4] == 0, "PCM curto completa com silêncio");
+            File.Delete(padded);
+
+            string trimmed = path + ".trim.w154";
+            var longPcm = new byte[pcm.Length + 4];
+            pcm.CopyTo(longPcm, 0);
+            longPcm[^1] = 0xFF;
+            using (var longStream = new MemoryStream(longPcm))
+                Converter.EncodeFrames([frame], 24, contain: false, dither: false, trimmed, longStream, 48000);
+            byte[] trimFile = File.ReadAllBytes(trimmed);
+            Check(trimFile.Length == file.Length && trimFile[^1] == pcm[^1], "PCM longo é cortado");
+            File.Delete(trimmed);
+
+            ExpectReject(WithU32(file, (int)audioOffset + 4, 22050), "sample_rate 22050 é recusado");
+            ExpectReject(WithU16(file, (int)audioOffset + 8, 2), "channels 2 é recusado");
+            ExpectReject(WithU32(file, (int)audioOffset, 1), "pcm_bytes ímpar é recusado");
+            byte[] badCrc = (byte[])file.Clone();
+            badCrc[(int)audioOffset + AudioPcm.HeaderBytes] ^= 0xFF;
+            ExpectReject(badCrc, "crc32 do PCM alterado é recusado");
+            ExpectReject(WithU32(file, 28, audioOffset + 4), "folga antes do PCM é recusada");
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    static uint ReadU32(byte[] data, int offset) =>
+        (uint)(data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24));
+
+    static byte[] WithU32(byte[] source, int offset, uint value)
+    {
+        byte[] copy = (byte[])source.Clone();
+        copy[offset] = (byte)value;
+        copy[offset + 1] = (byte)(value >> 8);
+        copy[offset + 2] = (byte)(value >> 16);
+        copy[offset + 3] = (byte)(value >> 24);
+        return copy;
+    }
+
+    static byte[] WithU16(byte[] source, int offset, ushort value)
+    {
+        byte[] copy = (byte[])source.Clone();
+        copy[offset] = (byte)value;
+        copy[offset + 1] = (byte)(value >> 8);
+        return copy;
+    }
+
+    static void ExpectReject(byte[] bytes, string name)
+    {
+        string path = Path.Combine(Path.GetTempPath(), "w154-bad-" + Guid.NewGuid().ToString("N") + ".w154");
+        try
+        {
+            File.WriteAllBytes(path, bytes);
+            bool failed = false;
+            try
+            {
+                W154File.Verify(path);
+            }
+            catch (W154Exception)
+            {
+                failed = true;
+            }
+
+            Check(failed, name);
         }
         finally
         {

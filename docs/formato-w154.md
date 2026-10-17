@@ -2,7 +2,7 @@
 
 Contrato do arquivo que um conversor grava e que um player ou um sender lê. A versão deste texto é a v1. Um leitor da v1 recusa qualquer outro `version` ou `header_size`.
 
-O painel mostra RGB565. O arquivo guarda **índices de palette**. O Wi-Fi carrega o `body` de cada quadro, nunca um quadro RGB565 inteiro. Áudio não entra neste arquivo.
+O painel mostra RGB565. O arquivo guarda **índices de palette**. O Wi-Fi carrega o `body` de cada quadro, nunca um quadro RGB565 inteiro. O PCM, quando existe, fica num bloco depois do último quadro e sai em datagramas próprios.
 
 Nomes de campo, de flag e de estrutura ficam em inglês.
 
@@ -61,10 +61,11 @@ offset[0] = 32 + frame_count * 4
 +---------------- frames, packed, sem folga ----------------+
 | u32 body_bytes | body[body_bytes] | próximo quadro | ... |
 +-----------------------------------------------------------+
-fim do arquivo = fim do último body
+audio_offset == 0: fim do arquivo = fim do último body
+audio_offset != 0: bloco de áudio começa nesse byte e o arquivo acaba no fim do PCM
 ```
 
-Não há bytes entre o header e a tabela, nem entre a tabela e o primeiro quadro, nem entre quadros, nem depois do último quadro.
+Não há bytes entre o header e a tabela, nem entre a tabela e o primeiro quadro, nem entre quadros. Com áudio, o bloco começa no byte seguinte ao último body.
 
 ## Header
 
@@ -80,7 +81,7 @@ Não há bytes entre o header e a tabela, nem entre a tabela e o primeiro quadro
 | 16 | u32 | `frame_us` | período de um quadro, em microssegundos |
 | 20 | u32 | `frame_count` | ≥ 1 |
 | 24 | u32 | `flags` | 0 |
-| 28 | u32 | reserved | 0 |
+| 28 | u32 | `audio_offset` | 0, ou o offset absoluto do bloco de áudio |
 
 `frame_us` aceito por um leitor está em `16667 .. 1000000` (60 fps .. 1 fps), inclusive.
 
@@ -107,7 +108,7 @@ C3 A2 00 00  01 00 00 00  00 00 00 00  00 00 00 00
 24 00 00 00
 ```
 
-A última linha é `offset[0]`. `32 + 1 * 4 = 36` (`0x24`).
+A última linha é `offset[0]`. `32 + 1 * 4 = 36` (`0x24`). Os quatro zeros do fim da segunda linha são `audio_offset`: esse exemplo não tem áudio.
 
 ## Tabela de offsets
 
@@ -319,6 +320,31 @@ Um delta cru, sem palette, com as 30 bands sujas:
 
 58244 é o máximo. Um leitor recusa qualquer body maior, inclusive um keyframe que alguém tente estender.
 
+## Áudio
+
+`audio_offset` 0 significa que o arquivo não tem PCM e acaba no fim do último body. Qualquer outro valor é o offset absoluto do bloco abaixo, e tem que ser o primeiro byte depois desse body.
+
+```text
+u32 pcm_bytes          > 0 e par
+u32 sample_rate        16000, 24000 ou 48000
+u16 channels           1
+u16 sample_format      0 = s16le
+u32 crc32              dos bytes de PCM, o mesmo CRC do body
+s16le pcm[pcm_bytes]
+```
+
+O `flags` do header continua 0. O CRC de cada body de vídeo não cobre o PCM. Não há ADPCM nem Opus nesta versão.
+
+A amostra 0 é o instante do quadro 0. A duração do PCM é a do vídeo:
+
+```text
+timeline_us  = frame_count * frame_us
+sample_count = (timeline_us * sample_rate + 500000) / 1000000
+pcm_bytes    = sample_count * 2
+```
+
+Origem mais curta termina em silêncio. Origem mais longa é cortada.
+
 ## O que um escritor grava
 
 A saída é sempre 240×240 índices. Escala e quantização acontecem antes dos bytes acima.
@@ -330,17 +356,20 @@ A saída é sempre 240×240 índices. Escala e quantização acontecem antes dos
 
 Dither não faz parte do formato. Ele só muda quais índices saem sujos.
 
+O PCM é mono s16le a 16000, 24000 ou 48000 Hz. A contagem de amostras segue a fórmula da seção [Áudio](#áudio). Sem stream de áudio na origem, `audio_offset` fica 0.
+
 ## O que um leitor aceita
 
 Recusar o arquivo no primeiro item que falhar:
 
-- Magic, `version`, `header_size`, `width`, `height`, `band_rows`, `band_count_max`, `flags` e reserved iguais à tabela. `frame_count ≥ 1`. `frame_us` em `16667 .. 1000000`.
-- `offset[0] = header_size + frame_count * 4`, e `offset[i + 1] = offset[i] + 4 + body_bytes[i]`. O arquivo acaba no fim do último body.
+- Magic, `version`, `header_size`, `width`, `height`, `band_rows`, `band_count_max` e `flags` iguais à tabela. `frame_count ≥ 1`. `frame_us` em `16667 .. 1000000`.
+- `offset[0] = header_size + frame_count * 4`, e `offset[i + 1] = offset[i] + 4 + body_bytes[i]`. Com `audio_offset` 0, o arquivo acaba no fim do último body. Com outro valor, esse valor é o fim do último body e o bloco de áudio começa aí.
 - Cada `body_bytes` está em `12 .. 58244`.
 - O `crc32` confere. Bits de `flags` fora de 0 e 1 estão limpos. Bits 30 e 31 de `band_mask` estão limpos. Population count igual a `band_count`.
 - O quadro 0, e todo múltiplo de `gop`, é keyframe: `flags = 3`, 30 bands, máscara `0x3FFFFFFF`, palette presente. Os outros quadros têm `flags = 0`.
 - Cada band decodifica para 1920 bytes. Codec 0 tem 1920 bytes crus. Codecs 1 e 2 são mais curtos que 1920. O byte `zero` e o pad são 0. Não sobra byte entre o último record e o `crc32`.
 - Percorrendo do quadro 0, cada bit ligado de um delta é uma diferença real contra o quadro indexado anterior, e cada bit desligado é uma band igual.
+- Se há áudio: `pcm_bytes` par e maior que 0, `sample_rate` numa das três taxas, `channels` 1, `sample_format` 0, `pcm_bytes` igual à fórmula, CRC do PCM confere, e não sobra byte depois dele.
 
 ## O que um player faz com um body válido
 
@@ -350,6 +379,8 @@ Recusar o arquivo no primeiro item que falhar:
 4. Um delta vazio não apresenta de novo.
 
 Um buraco de `frame_index` no transporte descarta deltas até chegar um keyframe. A última imagem apresentada permanece.
+
+O PCM toca no ES8311, no mesmo relógio: a amostra `i` está em `(i * 1000000) / sample_rate` microssegundos, e o quadro `n` em `n * frame_us`. Cerca de 20–40 ms de folga entre os dois basta para este alto-falante. O core 0 recebe o Wi-Fi e alimenta o I2S. O core 1 expande e faz o SPI, e não espera socket. O ring de I2S fica na DRAM interna, dezenas de ms (buffer de 50–100 ms), não segundos. O PA do GPIO7 fica alto só enquanto há áudio, e sobe cerca de 35 ms antes da primeira amostra. ES7210 e AEC duplex ficam de fora. Um quadro de vídeo pode cair. Num buraco de áudio, o player repete ou esmaece a última amostra em vez de travar o present.
 
 ## No ar
 
@@ -370,20 +401,34 @@ frag_count    = ceil(body_bytes / 1456)
 payload       = até 1456 bytes do body, em ordem, sem o u32 body_bytes
 ```
 
-`seq` fica no offset 0 para um contador no estilo de um flood UDP enxergar o buraco. Fragmento faltando derruba o quadro inteiro. `frame_index` mais velho que o último apresentado chega tarde e é descartado. O loop de present não espera um buraco fechar.
+`seq` fica no offset 0 para um contador no estilo de um flood UDP enxergar o buraco. Fragmento faltando derruba o quadro inteiro. `frame_index` mais velho que o último apresentado chega tarde e é descartado. O loop de present não espera um buraco fechar. Não há type byte na frente desse datagrama.
 
-A conta de taxa usa o payload UDP, não os 57600 bytes do quadro indexado. Headers IP e UDP ficam de fora; o header de 16 bytes acima entra:
+O PCM não entra nesses datagramas. Ele sai noutro socket UDP, com a própria sequência. Um datagrama de áudio também tem no máximo 1472 bytes:
+
+| Offset | Tipo | Campo |
+| ---: | --- | --- |
+| 0 | u32 | `seq`. Sobe 1 só entre datagramas de áudio |
+| 4 | u32 | `time_us`. Instante da primeira amostra deste payload |
+| 8 | u16 | `payload_bytes`. Par, 2..1456 |
+| 10 | u16 | reserved. 0 |
+| 12 | u32 | reserved. 0 |
+| 16 | s16le | amostras |
+
+O cabeçalho tem 16 bytes, como o de vídeo. A fatia é o maior payload par que cabe em 1456. 20 ms a 48 kHz mono são 1920 bytes e não cabem. O `seq` de áudio não se mistura com o de vídeo.
+
+A conta de taxa usa o payload UDP, não os 57600 bytes do quadro indexado. Headers IP e UDP ficam de fora; o header de 16 bytes entra, no vídeo e no áudio:
 
 ```text
-frags     = ceil(body_bytes / 1456)
-udp_bytes = body_bytes + 16 * frags
+frags     = ceil(payload / 1456)
+udp_bytes = payload + 16 * frags
 ```
 
-| Body | `frags` | `udp_bytes` |
+| Payload | `frags` | `udp_bytes` |
 | --- | ---: | ---: |
 | keyframe cru, 58244 | 41 | 58900 |
 | delta cru, 57732 | 40 | 58372 |
+| 1 s de PCM a 48000 Hz, 96000 | 66 | 97056 |
 
-Um segundo alinhado em `frame_us` soma o `udp_bytes` dos quadros cujo instante `n * frame_us` cai nesse segundo. A média é `total_udp_bytes * 8 / (frame_count * frame_us)` em Mbit/s.
+Um segundo alinhado em `frame_us` soma o `udp_bytes` dos quadros cujo instante `n * frame_us` cai nesse segundo, mais o PCM cuja amostra `i` cai nele. O segundo da amostra é `((i * 1000000) / sample_rate) / 1000000`. A média é `total_udp_bytes * 8 / (frame_count * frame_us)` em Mbit/s, com o áudio dentro do total.
 
-Um arquivo todo sujo, com um keyframe por segundo, fica em cerca de 11,2 Mbit/s a 24 fps e 14,0 Mbit/s a 30 fps. Abaixo de 16 o rádio medido deste painel fica confortável. De 16 a 21 é intermitente. Acima de 21 passa do platô medido.
+Um arquivo todo sujo, com um keyframe por segundo e sem áudio, fica em cerca de 11,2 Mbit/s a 24 fps e 14,0 Mbit/s a 30 fps. Um segundo de PCM mono a 48 kHz soma cerca de 0,78 Mbit/s. Abaixo de 16 o rádio medido deste painel fica confortável. De 16 a 21 é intermitente. Acima de 21 passa do platô medido.

@@ -6,7 +6,9 @@ readonly record struct ConvertRequest(
     int Fps,
     FitMode Fit,
     bool Dither,
-    bool AllowOverBudget);
+    bool AllowOverBudget,
+    int SampleRate,
+    bool IncludeAudio);
 
 static class Converter
 {
@@ -23,6 +25,7 @@ static class Converter
         using var draft = new W154Draft();
         byte[]? previous = null;
         int index = 0;
+        string? pcmPath = null;
         var progress = new ConvertProgress(log, EstimateFrames(size.DurationSeconds, request.Fps));
 
         void Flush()
@@ -65,30 +68,70 @@ static class Converter
         if (draft.Count == 0)
             throw new W154Exception("o vídeo não tem quadros.");
 
-        int[] lengths = draft.Complete(request.Output, frameUs);
+        int sampleRate = 0;
+        int sampleCount = 0;
+        FileStream? pcm = null;
         try
         {
-            W154File.Verify(request.Output);
-        }
-        catch
-        {
-            if (File.Exists(request.Output))
-                File.Delete(request.Output);
-            throw;
-        }
+            if (request.IncludeAudio && size.HasAudio)
+            {
+                sampleRate = request.SampleRate;
+                sampleCount = AudioPcm.SampleCount(draft.Count, frameUs, sampleRate);
+                pcmPath = Path.Combine(Path.GetTempPath(), "w154-pcm-" + Guid.NewGuid().ToString("N") + ".s16le");
+                FfmpegDecoder.ReadPcm(ffmpeg, request.Input, sampleRate, pcmPath);
+                pcm = new FileStream(pcmPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                log.WriteLine($"áudio {sampleRate} Hz mono, {sampleCount} amostras");
+            }
+            else if (request.IncludeAudio)
+            {
+                log.WriteLine("a fonte não tem áudio. O arquivo fica só com vídeo.");
+            }
+            else
+            {
+                log.WriteLine("sem áudio");
+            }
 
-        RateReport rate = RateCheck.Measure(frameUs, lengths);
-        log.WriteLine($"arquivo {request.Output}");
-        log.WriteLine($"quadros {lengths.Length}");
-        log.WriteLine($"média {FormatMbps(rate.AverageMbps)} Mbit/s");
-        log.WriteLine($"pior segundo {rate.WorstSecond}: {FormatMbps(rate.WorstMbps)} Mbit/s — {BandName(rate.Band)}");
-        if (rate.WorstMbps <= 16 || request.AllowOverBudget)
-            return 0;
-        log.WriteLine("acima de 16 Mbit/s. O arquivo foi gravado. Use --allow-over-budget para sair com sucesso.");
-        return 2;
+            int[] lengths = draft.Complete(request.Output, frameUs, pcm, sampleRate);
+            pcm?.Dispose();
+            pcm = null;
+
+            try
+            {
+                W154File.Verify(request.Output);
+            }
+            catch
+            {
+                if (File.Exists(request.Output))
+                    File.Delete(request.Output);
+                throw;
+            }
+
+            RateReport rate = RateCheck.Measure(frameUs, lengths, sampleRate, sampleCount);
+            log.WriteLine($"arquivo {request.Output}");
+            log.WriteLine($"quadros {lengths.Length}");
+            log.WriteLine($"média {FormatMbps(rate.AverageMbps)} Mbit/s");
+            log.WriteLine($"pior segundo {rate.WorstSecond}: {FormatMbps(rate.WorstMbps)} Mbit/s — {BandName(rate.Band)}");
+            if (rate.WorstMbps <= 16 || request.AllowOverBudget)
+                return 0;
+            log.WriteLine("acima de 16 Mbit/s. O arquivo foi gravado. Use --allow-over-budget para sair com sucesso.");
+            return 2;
+        }
+        finally
+        {
+            pcm?.Dispose();
+            if (pcmPath is not null && File.Exists(pcmPath))
+                File.Delete(pcmPath);
+        }
     }
 
-    public static int[] EncodeFrames(IReadOnlyList<ushort[]> frames, int fps, bool contain, bool dither, string output)
+    public static int[] EncodeFrames(
+        IReadOnlyList<ushort[]> frames,
+        int fps,
+        bool contain,
+        bool dither,
+        string output,
+        Stream? pcm = null,
+        int sampleRate = 0)
     {
         int frameUs = PictureContract.FrameUs(fps);
         int gop = PictureContract.Gop(frameUs);
@@ -110,7 +153,7 @@ static class Converter
             }
         }
 
-        int[] lengths = W154File.Write(output, frameUs, bodies);
+        int[] lengths = W154File.Write(output, frameUs, bodies, pcm, sampleRate);
         W154File.Verify(output);
         return lengths;
     }

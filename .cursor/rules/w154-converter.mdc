@@ -21,13 +21,14 @@ O projeto `W154Convert` grava o arquivo descrito no guia 12 do painel Waveshare 
 - `frame_us = (1000000 + fps / 2) / fps`. fps inteiro de 1 a 60. `gop = max(1, (1000000 + frame_us / 2) / frame_us)`.
 - Um palette por GOP. Frame 0 e todo índice múltiplo de `gop` é keyframe: bits 0 e 1, 30 bandas, `band_mask = 0x3FFFFFFF`, paleta de 256 entradas. Delta não traz paleta. Banda omitida é igual à do quadro anterior. Delta vazio é válido.
 - `contain` reserva `palette[0] = 0` (barras pretas). `cover` recorta o centro para 1:1.
+- PCM mono s16le a 16000, 24000 ou 48000 Hz (padrão 48000), no bloco depois do último quadro. `audio_offset` 0 é arquivo sem áudio. `--sample-rate` e `--no-audio`. Amostra 0 no quadro 0. `sample_count = (frame_count * frame_us * sample_rate + 500000) / 1000000`. Origem curta ganha silêncio; origem longa é cortada.
 - Por banda, RLE e um bloco LZ4 (sem frame header). Descartar `comp_bytes >= 1920`. O menor ganha. Empate fica RLE. Senão, raw de 1920. Pad de zeros até múltiplo de 4.
-- CRC32 PNG/zlib (poly `0xEDB88320`, init e xor-out `0xFFFFFFFF`) cobre o body antes do campo. `body_bytes` máximo 58244.
-- O CLI não escreve datagramas. A taxa é `frags = ceil(body_bytes / 1456)`, `udp_bytes = body_bytes + 16 * frags`. Sucesso padrão: pior segundo ≤ 16 Mbit/s. Acima disso o arquivo continua gravado e o processo sai com código 2, salvo `--allow-over-budget`.
+- CRC32 PNG/zlib (poly `0xEDB88320`, init e xor-out `0xFFFFFFFF`) cobre o body antes do campo, e o PCM à parte. `body_bytes` máximo 58244.
+- O CLI não escreve datagramas. Vídeo e áudio saem em sockets diferentes; o cabeçalho de cada um tem 16 bytes. A taxa é `frags = ceil(payload / 1456)`, `udp_bytes = payload + 16 * frags`, somando o PCM no mesmo segundo. Sucesso padrão: pior segundo ≤ 16 Mbit/s. Acima disso o arquivo continua gravado e o processo sai com código 2, salvo `--allow-over-budget`.
 
 ## ffmpeg
 
-Processo separado. Procurar `ffmpeg.exe` ao lado do exe, depois `tools/ffmpeg/win-x64/ffmpeg.exe` subindo diretórios, depois o `PATH`. Não linkar biblioteca de decode.
+Processo separado. Áudio, quando entra, é um segundo processo (`-ac 1`, s16le). Procurar `ffmpeg.exe` ao lado do exe, depois `tools/ffmpeg/win-x64/ffmpeg.exe` subindo diretórios, depois o `PATH`. Não linkar biblioteca de decode.
 
 ## Quando o formato mudar
 

@@ -91,10 +91,10 @@ sealed class W154Draft : IDisposable
         _lengths.Add(body.Length);
     }
 
-    public int[] Complete(string path, int frameUs)
+    public int[] Complete(string path, int frameUs, Stream? pcm = null, int sampleRate = 0)
     {
         int[] lengths = _lengths.ToArray();
-        W154File.WritePrefixed(path, frameUs, lengths, _temp);
+        W154File.WritePrefixed(path, frameUs, lengths, _temp, pcm, sampleRate);
         return lengths;
     }
 
@@ -108,20 +108,39 @@ sealed class W154Draft : IDisposable
 
 static class W154File
 {
-    public static int[] Write(string path, int frameUs, IReadOnlyList<byte[]> bodies)
+    public static int[] Write(string path, int frameUs, IReadOnlyList<byte[]> bodies, Stream? pcm = null, int sampleRate = 0)
     {
         using var draft = new W154Draft();
         foreach (byte[] body in bodies)
             draft.Add(body);
-        return draft.Complete(path, frameUs);
+        return draft.Complete(path, frameUs, pcm, sampleRate);
     }
 
-    public static void WritePrefixed(string path, int frameUs, int[] lengths, Stream prefixed)
+    public static void WritePrefixed(string path, int frameUs, int[] lengths, Stream prefixed, Stream? pcm = null, int sampleRate = 0)
     {
         if (lengths.Length < 1)
             throw new W154Exception("o vídeo não tem quadros.");
         if (frameUs is < 16667 or > 1_000_000)
             throw new W154Exception("frame_us fora de 16667..1000000.");
+
+        long videoEnd = PictureContract.HeaderSize + (lengths.Length * 4L);
+        foreach (int length in lengths)
+        {
+            videoEnd += 4L + length;
+            if (videoEnd > uint.MaxValue)
+                throw new W154Exception("o arquivo passa de 4 GiB e o offset u32 não cabe.");
+        }
+
+        uint audioOffset = 0;
+        int pcmBytes = 0;
+        uint pcmCrc = 0;
+        if (pcm is not null)
+        {
+            AudioPcm.RequireRate(sampleRate);
+            pcmBytes = AudioPcm.SampleCount(lengths.Length, frameUs, sampleRate) * 2;
+            pcmCrc = AudioPcm.CrcFitted(pcm, pcmBytes);
+            audioOffset = (uint)videoEnd;
+        }
 
         string? directory = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrEmpty(directory))
@@ -145,14 +164,13 @@ static class W154File
                 BinaryPrimitives.WriteUInt16LittleEndian(header[14..], PictureContract.BandCount);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[16..], (uint)frameUs);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[20..], (uint)lengths.Length);
+                BinaryPrimitives.WriteUInt32LittleEndian(header[28..], audioOffset);
                 output.Write(header);
 
                 long cursor = PictureContract.HeaderSize + (lengths.Length * 4L);
                 Span<byte> offset = stackalloc byte[4];
                 foreach (int length in lengths)
                 {
-                    if (cursor > uint.MaxValue)
-                        throw new W154Exception("o arquivo passa de 4 GiB e o offset u32 não cabe.");
                     BinaryPrimitives.WriteUInt32LittleEndian(offset, (uint)cursor);
                     output.Write(offset);
                     cursor += 4L + length;
@@ -160,6 +178,19 @@ static class W154File
 
                 prefixed.Position = 0;
                 prefixed.CopyTo(output);
+
+                if (pcm is not null)
+                {
+                    Span<byte> audio = stackalloc byte[AudioPcm.HeaderBytes];
+                    BinaryPrimitives.WriteUInt32LittleEndian(audio, (uint)pcmBytes);
+                    BinaryPrimitives.WriteUInt32LittleEndian(audio[4..], (uint)sampleRate);
+                    BinaryPrimitives.WriteUInt16LittleEndian(audio[8..], AudioPcm.Channels);
+                    BinaryPrimitives.WriteUInt16LittleEndian(audio[10..], AudioPcm.FormatS16Le);
+                    BinaryPrimitives.WriteUInt32LittleEndian(audio[12..], pcmCrc);
+                    output.Write(audio);
+                    pcm.Position = 0;
+                    AudioPcm.CopyFitted(pcm, output, pcmBytes);
+                }
             }
 
             File.Move(partial, path, overwrite: true);
@@ -192,9 +223,9 @@ static class W154File
 
         uint frameUs = BinaryPrimitives.ReadUInt32LittleEndian(header[16..]);
         uint frameCount = BinaryPrimitives.ReadUInt32LittleEndian(header[20..]);
-        if (BinaryPrimitives.ReadUInt32LittleEndian(header[24..]) != 0
-            || BinaryPrimitives.ReadUInt32LittleEndian(header[28..]) != 0)
-            throw new W154Exception("flags ou reserved do header não são 0.");
+        uint audioOffset = BinaryPrimitives.ReadUInt32LittleEndian(header[28..]);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(header[24..]) != 0)
+            throw new W154Exception("flags do header não são 0.");
         if (frameCount < 1)
             throw new W154Exception("frame_count menor que 1.");
         if (frameUs is < 16667 or > 1_000_000)
@@ -236,9 +267,66 @@ static class W154File
                 throw new W154Exception($"offset do quadro {i + 1} não vem depois do quadro {i}.");
         }
 
-        if (stream.Position != stream.Length)
-            throw new W154Exception("bytes sobrando depois do último quadro.");
+        if (audioOffset == 0)
+        {
+            if (stream.Position != stream.Length)
+                throw new W154Exception("bytes sobrando depois do último quadro.");
+            return lengths;
+        }
+
+        if (stream.Position != audioOffset)
+            throw new W154Exception("audio_offset não aponta para o fim do vídeo.");
+        VerifyAudio(stream, (int)frameCount, (int)frameUs);
         return lengths;
+    }
+
+    static void VerifyAudio(Stream stream, int frameCount, int frameUs)
+    {
+        Span<byte> audio = stackalloc byte[AudioPcm.HeaderBytes];
+        ReadExact(stream, audio);
+        uint pcmBytes = BinaryPrimitives.ReadUInt32LittleEndian(audio);
+        uint sampleRate = BinaryPrimitives.ReadUInt32LittleEndian(audio[4..]);
+        ushort channels = BinaryPrimitives.ReadUInt16LittleEndian(audio[8..]);
+        ushort format = BinaryPrimitives.ReadUInt16LittleEndian(audio[10..]);
+        uint stored = BinaryPrimitives.ReadUInt32LittleEndian(audio[12..]);
+        if (pcmBytes == 0 || (pcmBytes & 1) != 0)
+            throw new W154Exception("pcm_bytes inválido.");
+        if (!AudioPcm.IsRate((int)sampleRate))
+            throw new W154Exception("sample_rate fora de 16000, 24000 e 48000.");
+        if (channels != AudioPcm.Channels)
+            throw new W154Exception("channels diferente de 1.");
+        if (format != AudioPcm.FormatS16Le)
+            throw new W154Exception("sample_format diferente de 0.");
+
+        int expected = AudioPcm.SampleCount(frameCount, frameUs, (int)sampleRate) * 2;
+        if (pcmBytes != (uint)expected)
+            throw new W154Exception("pcm_bytes não cobre a duração do vídeo.");
+        if ((long)pcmBytes > stream.Length - stream.Position)
+            throw new W154Exception("arquivo acabou antes do PCM.");
+
+        uint actual = CrcFitted(stream, pcmBytes);
+        if (stored != actual)
+            throw new W154Exception("crc32 do PCM diferente.");
+        if (stream.Position != stream.Length)
+            throw new W154Exception("bytes sobrando depois do PCM.");
+    }
+
+    static uint CrcFitted(Stream stream, uint length)
+    {
+        uint crc = 0xFFFFFFFF;
+        var buffer = new byte[65536];
+        long left = length;
+        while (left > 0)
+        {
+            int want = (int)Math.Min(buffer.Length, left);
+            int got = stream.Read(buffer, 0, want);
+            if (got == 0)
+                throw new W154Exception("arquivo acabou antes do esperado.");
+            crc = Crc32.Update(crc, buffer.AsSpan(0, got));
+            left -= got;
+        }
+
+        return Crc32.Finish(crc);
     }
 
     static byte[] DecodeFrame(int index, int gop, byte[] body, byte[]? previous)

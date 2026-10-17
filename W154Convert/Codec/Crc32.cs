@@ -4,13 +4,16 @@ static class Crc32
 {
     static readonly uint[] Table = BuildTable();
 
-    public static uint Compute(ReadOnlySpan<byte> data)
+    public static uint Compute(ReadOnlySpan<byte> data) => Finish(Update(0xFFFFFFFF, data));
+
+    public static uint Update(uint crc, ReadOnlySpan<byte> data)
     {
-        uint crc = 0xFFFFFFFF;
         foreach (byte b in data)
             crc = Table[(crc ^ b) & 0xFF] ^ (crc >> 8);
-        return crc ^ 0xFFFFFFFF;
+        return crc;
     }
+
+    public static uint Finish(uint crc) => crc ^ 0xFFFFFFFF;
 
     static uint[] BuildTable()
     {

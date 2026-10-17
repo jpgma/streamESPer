@@ -5,7 +5,7 @@ namespace W154Convert;
 
 static class FfmpegDecoder
 {
-    public readonly record struct VideoSize(int Width, int Height, double? DurationSeconds);
+    public readonly record struct VideoSize(int Width, int Height, double? DurationSeconds, bool HasAudio);
 
     public static VideoSize Probe(string ffmpeg, string input)
     {
@@ -28,6 +28,7 @@ static class FfmpegDecoder
         int width = 0;
         int height = 0;
         double? duration = null;
+        bool hasAudio = false;
         foreach (string line in stderr.Split('\n'))
         {
             if (width == 0 && TryParseSize(line, out int w, out int h))
@@ -38,13 +39,15 @@ static class FfmpegDecoder
 
             if (duration is null && TryParseDuration(line, out double seconds))
                 duration = seconds;
+            if (line.Contains("Audio:", StringComparison.Ordinal))
+                hasAudio = true;
         }
 
         if (width > 0 && height > 0)
         {
             if (width > 16384 || height > 16384)
                 throw new W154Exception($"quadro {width}x{height} passa do limite de 16384.");
-            return new VideoSize(width, height, duration);
+            return new VideoSize(width, height, duration, hasAudio);
         }
 
         throw new W154Exception("o ffmpeg não achou um stream de vídeo nesse arquivo.");
@@ -119,12 +122,50 @@ static class FfmpegDecoder
         }
 
         if (process.ExitCode != 0)
+            throw FfmpegFailed(process.ExitCode, stderr.ToString());
+    }
+
+    public static void ReadPcm(string ffmpeg, string input, int sampleRate, string outputPath)
+    {
+        AudioPcm.RequireRate(sampleRate);
+        var start = new ProcessStartInfo
         {
-            string detail = stderr.ToString().Trim();
-            throw new W154Exception(string.IsNullOrEmpty(detail)
-                ? $"ffmpeg saiu com código {process.ExitCode}."
-                : $"ffmpeg saiu com código {process.ExitCode}: {detail}");
-        }
+            FileName = ffmpeg,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        start.ArgumentList.Add("-hide_banner");
+        start.ArgumentList.Add("-loglevel");
+        start.ArgumentList.Add("error");
+        start.ArgumentList.Add("-y");
+        start.ArgumentList.Add("-i");
+        start.ArgumentList.Add(input);
+        start.ArgumentList.Add("-map");
+        start.ArgumentList.Add("0:a:0");
+        start.ArgumentList.Add("-ac");
+        start.ArgumentList.Add("1");
+        start.ArgumentList.Add("-ar");
+        start.ArgumentList.Add(sampleRate.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        start.ArgumentList.Add("-acodec");
+        start.ArgumentList.Add("pcm_s16le");
+        start.ArgumentList.Add("-f");
+        start.ArgumentList.Add("s16le");
+        start.ArgumentList.Add(outputPath);
+
+        using var process = Process.Start(start) ?? throw new W154Exception("não foi possível iniciar o ffmpeg.");
+        string stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+            throw FfmpegFailed(process.ExitCode, stderr);
+    }
+
+    static W154Exception FfmpegFailed(int exitCode, string stderr)
+    {
+        string detail = stderr.Trim();
+        return new W154Exception(string.IsNullOrEmpty(detail)
+            ? $"ffmpeg saiu com código {exitCode}."
+            : $"ffmpeg saiu com código {exitCode}: {detail}");
     }
 
     static bool TryParseSize(string line, out int width, out int height)
