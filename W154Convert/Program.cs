@@ -72,6 +72,8 @@ static class Program
 
     static ConvertRequest Build(string input, string output, int fps, FitMode fit, bool dither, bool allowOverBudget)
     {
+        input = Unquote(input);
+        output = Unquote(output);
         if (!File.Exists(input))
             throw new W154Exception($"arquivo não encontrado: {input}");
         _ = PictureContract.FrameUs(fps);
@@ -98,7 +100,15 @@ static class Program
         string? line = Console.ReadLine();
         if (string.IsNullOrWhiteSpace(line))
             return current ?? "";
-        return line.Trim();
+        return Unquote(line);
+    }
+
+    static string Unquote(string value)
+    {
+        value = value.Trim();
+        if (value.Length >= 2 && value[0] == value[^1] && value[0] is '"' or '\'')
+            return value[1..^1].Trim();
+        return value;
     }
 
     static int AskInt(string label, int current)
