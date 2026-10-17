@@ -1,0 +1,25 @@
+---
+description: Minimal API que envia .w154 em UDP para o painel
+globs: W154Stream/**/*.cs
+alwaysApply: false
+---
+
+# API `W154Stream`
+
+Processo ASP.NET Core que o operador controla por HTTP e que empurra vídeo e PCM em UDP. O device entra com um hello. O arquivo `.w154` não muda.
+
+## Projeto
+
+- `net10.0`, `PublishAot`, `InvariantGlobalization`, `WebApplication.CreateSlimBuilder`.
+- JSON só com `JsonSerializerContext`. Sem Swagger, sem EF, sem repositório, sem mediação.
+- Um hosted service. Estado de envio em `struct`, buffer de datagrama reutilizado, `Span` no body.
+- Identificadores em inglês. Texto de erro e log em pt-BR.
+
+## Envio
+
+- Vídeo e áudio seguem `docs/formato-w154.md` (seção No ar), cada um no seu socket de destino. Sem type byte no datagrama de vídeo.
+- Hello, credit e control são o protocolo de `docs/api-w154.md`. Não misturar com o body.
+- O vídeo sai na velocidade do `SendTo`, freado só pelo crédito (`free_bytes` menos o que já saiu depois de `expect_seq`). Sem sleep por `frame_us`.
+- O PCM fica cerca de 80 ms à frente do `play_frame` reportado. Não entra no ring de vídeo.
+- Um client por vez. Hello novo substitui o anterior. Um arquivo por `POST /play`.
+- `POST /play` recusa nome com separador de pasta ou `..`.

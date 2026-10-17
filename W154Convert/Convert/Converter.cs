@@ -37,7 +37,7 @@ static class Converter
             {
                 bool keyframe = index % gop == 0;
                 byte[] indices = IndexMap.Map(frame, palette, request.Dither);
-                draft.Add(FrameEncoder.Build(keyframe, palette, indices, previous ?? indices));
+                draft.Add(FrameEncoder.Build(keyframe, palette.Entries, indices, previous ?? indices));
                 previous = indices;
                 index++;
             }
@@ -148,7 +148,7 @@ static class Converter
             {
                 int index = offset + i;
                 byte[] indices = IndexMap.Map(slice[i], palette, dither);
-                bodies.Add(FrameEncoder.Build(index % gop == 0, palette, indices, previous ?? indices));
+                bodies.Add(FrameEncoder.Build(index % gop == 0, palette.Entries, indices, previous ?? indices));
                 previous = indices;
             }
         }

@@ -432,3 +432,5 @@ udp_bytes = payload + 16 * frags
 Um segundo alinhado em `frame_us` soma o `udp_bytes` dos quadros cujo instante `n * frame_us` cai nesse segundo, mais o PCM cuja amostra `i` cai nele. O segundo da amostra é `((i * 1000000) / sample_rate) / 1000000`. A média é `total_udp_bytes * 8 / (frame_count * frame_us)` em Mbit/s, com o áudio dentro do total.
 
 Um arquivo todo sujo, com um keyframe por segundo e sem áudio, fica em cerca de 11,2 Mbit/s a 24 fps e 14,0 Mbit/s a 30 fps. Um segundo de PCM mono a 48 kHz soma cerca de 0,78 Mbit/s. Abaixo de 16 o rádio medido deste painel fica confortável. De 16 a 21 é intermitente. Acima de 21 passa do platô medido.
+
+A sessão em volta desses datagramas (hello, credit, control, pause) está em [api-w154.md](api-w154.md). Ela não altera os bytes do arquivo nem o header de vídeo ou de áudio.

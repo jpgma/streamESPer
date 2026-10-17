@@ -8,3 +8,10 @@ artifacts/
 tools/ffmpeg/*.zip
 vlc-w154/.cache/
 vlc-w154/out/
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/managed_components/
+firmware/**/dependencies.lock
+firmware/w154/main/wifi_secrets.h
+

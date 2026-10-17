@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class Lz4Block
+public static class Lz4Block
 {
     const int HashLog = 12;
     const int LastLiterals = 5;

@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class Crc32
+public static class Crc32
 {
     static readonly uint[] Table = BuildTable();
 

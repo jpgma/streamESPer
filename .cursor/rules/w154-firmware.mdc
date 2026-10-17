@@ -1,0 +1,23 @@
+---
+description: Firmware C do player .w154 no ESP32-S3 do painel 1,54"
+globs: firmware/**/*.{c,h}
+alwaysApply: false
+---
+
+# Firmware `firmware/w154`
+
+Player do painel Waveshare. C, sem C++. Comentário em pt-BR no formato `[fn] o que a função faz`. Identificadores em inglês.
+
+## Caminho do frame
+
+- Sem `malloc` depois do boot. Ring, quadros indexados e o buffer de montagem saem de um carve na PSRAM. Bounce e ring de I2S ficam na DRAM interna.
+- Core 0: Wi-Fi, sockets, credit, decode e I2S. Core 1: expand e SPI. O core 1 não chama `recv`.
+- Bounce duplo de 8 linhas (`2 × 8 × 240 × 2` bytes), `DMA_ATTR`. Band limpa não gera SPI. Delta vazio não redesenha.
+- Dois quadros indexados. Publicação por índice atômico, sem fila de frames.
+- Underrun pausa o relógio e continua recebendo. Buraco de `seq` descarta até o próximo keyframe.
+- Áudio: PCM mono na DRAM interna, dezenas de ms, PA do GPIO7 só enquanto há amostra. Sem ES7210.
+
+## Rede
+
+- `wifi_secrets.h` não entra no git. Copiar de `wifi_secrets.example.h`.
+- Datagramas de vídeo e áudio como em `docs/formato-w154.md`. Sessão como em `docs/api-w154.md`.

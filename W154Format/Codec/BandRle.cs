@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class BandRle
+public static class BandRle
 {
     public static byte[] Encode(ReadOnlySpan<byte> src)
     {

@@ -1,15 +1,15 @@
-namespace W154Convert;
+namespace W154Format;
 
-enum RateBand
+public enum RateBand
 {
     Comfortable,
     Intermittent,
     Stall,
 }
 
-readonly record struct RateReport(double AverageMbps, double WorstMbps, int WorstSecond, RateBand Band);
+public readonly record struct RateReport(double AverageMbps, double WorstMbps, int WorstSecond, RateBand Band);
 
-static class RateCheck
+public static class RateCheck
 {
     public static int UdpBytes(int bodyBytes)
     {

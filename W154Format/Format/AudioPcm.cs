@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class AudioPcm
+public static class AudioPcm
 {
     public const int HeaderBytes = 16;
     public const int Channels = 1;

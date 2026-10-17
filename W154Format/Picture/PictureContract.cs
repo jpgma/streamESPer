@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class PictureContract
+public static class PictureContract
 {
     public const int Width = 240;
     public const int Height = 240;

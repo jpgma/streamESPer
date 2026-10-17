@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class BandCodec
+public static class BandCodec
 {
     public const byte Raw = 0;
     public const byte Rle = 1;

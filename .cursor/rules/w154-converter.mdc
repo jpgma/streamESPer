@@ -1,16 +1,16 @@
 ---
 description: Contrato e convenções do conversor .w154 ao editar o projeto W154Convert
-globs: W154Convert/**/*.cs,docs/**/*.md
+globs: W154Convert/**/*.cs,docs/conversor-w154.md
 alwaysApply: false
 ---
 
 # Conversor `.w154`
 
-O projeto `W154Convert` grava o arquivo descrito no guia 12 do painel Waveshare (240×240, índices, bandas de 8 linhas, paleta RGB565). A API de streaming é outro projeto da solution `StreamESPer` e não herda estas regras.
+O projeto `W154Convert` grava o arquivo descrito no guia 12 do painel Waveshare (240×240, índices, bandas de 8 linhas, paleta RGB565). A API de streaming é outro projeto da solution `StreamESPer` e não herda estas regras. CRC, RLE, LZ4 e o container moram em `W154Format`. Este projeto não reimplementa codec.
 
 ## Projeto
 
-- `net10.0`, sem `PackageReference`. CRC, RLE, LZ4, CLI e o container ficam no próprio código.
+- `net10.0`, sem `PackageReference`. O formato entra por `ProjectReference` a `W154Format`. CLI, ffmpeg e quantização ficam aqui.
 - `PublishAot` e `InvariantGlobalization` permanecem ligados. Não usar reflexão, `Regex` interpretado nem APIs que exijam ICU.
 - Identificadores, flags e nomes de campo ficam em inglês (`frame_us`, `band_mask`, `body_bytes`, `keyframe`, `gop`, `cover`, `contain`).
 - Prompt, erro, progresso e documentação em pt-BR.

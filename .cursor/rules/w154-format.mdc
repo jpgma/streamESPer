@@ -1,0 +1,30 @@
+---
+description: Contrato do container .w154 na lib compartilhada W154Format
+globs: W154Format/**/*.cs
+alwaysApply: false
+---
+
+# Formato `.w154`
+
+`W154Format` é o único lugar de CRC, RLE, LZ4, header, body e bloco PCM. O conversor e a API referenciam este projeto. Não duplicar codec.
+
+## Projeto
+
+- `net10.0`, `IsAotCompatible`, `InvariantGlobalization`, sem `PackageReference`.
+- Sem reflexão, `Regex` interpretado ou API que exija ICU.
+- Identificadores e nomes de campo em inglês (`frame_us`, `band_mask`, `body_bytes`, `keyframe`, `gop`).
+- Erro e comentário em pt-BR.
+
+## Contrato
+
+- RGB565: `(R >> 3) << 11 | (G >> 2) << 5 | (B >> 3)`, little-endian, sem o invert do painel.
+- `frame_us = (1000000 + fps / 2) / fps`. `gop = max(1, (1000000 + frame_us / 2) / frame_us)`.
+- Keyframe: `flags = 3`, 30 bands, `band_mask = 0x3FFFFFFF`, palette de 256. Delta não traz palette. Delta vazio é válido.
+- PCM mono s16le a 16000, 24000 ou 48000. `audio_offset` 0 é arquivo sem áudio.
+- Por band, RLE e um bloco LZ4. Descartar `comp_bytes >= 1920`. O menor ganha. Empate fica RLE. Senão, raw de 1920.
+- CRC32 PNG/zlib cobre o body antes do campo, e o PCM à parte. `body_bytes` máximo 58244.
+- O leitor de envio (`W154Movie`) expõe spans do body e do PCM. Não decodifica band no caminho de envio.
+
+## Quando o formato mudar
+
+Atualizar `docs/formato-w154.md`, `docs/conversor-w154.md` e os vetores do `selftest` no mesmo passo.

@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-sealed class W154Exception : Exception
+public sealed class W154Exception : Exception
 {
     public W154Exception(string message) : base(message)
     {

@@ -12,4 +12,8 @@
     <Deterministic>true</Deterministic>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\W154Format\W154Format.csproj" />
+  </ItemGroup>
+
 </Project>

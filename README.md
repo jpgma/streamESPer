@@ -1,6 +1,6 @@
 # StreamESPer
 
-Solution .NET 10. O primeiro projeto é o conversor `w154`, que grava vídeo no formato do painel Waveshare 1,54". A API de streaming entra depois, na mesma solution.
+Solution .NET 10. O conversor `w154` grava vídeo no formato do painel Waveshare 1,54". A lib `W154Format` é o container compartilhado. A API `W154Stream` manda esse arquivo por UDP, e o firmware em `firmware/w154` apresenta no painel.
 
 ## Conversor
 
@@ -35,3 +35,15 @@ powershell -File vlc-w154/build.ps1
 ```
 
 No VLC, Arquivo > Abrir, ou `vlc --demux w154 video.w154`.
+
+## Streaming
+
+A API lê uma pasta de `.w154` e empurra o arquivo escolhido para o painel. O conceito está em [docs/api-w154.md](docs/api-w154.md). O player do device está em [docs/firmware-w154.md](docs/firmware-w154.md).
+
+```text
+dotnet run --project W154Stream -- --dir .
+dotnet run --project W154Stream -- --selftest
+powershell -File firmware/flash.ps1
+```
+
+`POST http://localhost:5090/play` com `{ "name": "clip.w154" }` começa o envio. O device precisa de `wifi_secrets.h` apontando para o IP do host.

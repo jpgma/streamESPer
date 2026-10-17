@@ -1,10 +1,10 @@
 using System.Buffers.Binary;
 
-namespace W154Convert;
+namespace W154Format;
 
-static class FrameEncoder
+public static class FrameEncoder
 {
-    public static byte[] Build(bool keyframe, Palette palette, ReadOnlySpan<byte> indices, ReadOnlySpan<byte> previous)
+    public static byte[] Build(bool keyframe, ReadOnlySpan<ushort> palette, ReadOnlySpan<byte> indices, ReadOnlySpan<byte> previous)
     {
         var body = new List<byte>(keyframe ? PictureContract.MaxBodyBytes : 4096);
         body.Add((byte)(keyframe ? 3 : 0));
@@ -12,10 +12,12 @@ static class FrameEncoder
 
         if (keyframe)
         {
+            if (palette.Length < PictureContract.PaletteColors)
+                throw new W154Exception("palette com menos de 256 entradas.");
             WriteU16(body, PictureContract.BandCount);
             WriteU32(body, PictureContract.KeyframeMask);
             for (int i = 0; i < PictureContract.PaletteColors; i++)
-                WriteU16(body, palette.Entries[i]);
+                WriteU16(body, palette[i]);
             for (int band = 0; band < PictureContract.BandCount; band++)
             {
                 int off = band * PictureContract.BandBytes;
@@ -66,7 +68,7 @@ static class FrameEncoder
     }
 }
 
-sealed class W154Draft : IDisposable
+public sealed class W154Draft : IDisposable
 {
     readonly string _tempPath;
     readonly FileStream _temp;
@@ -106,7 +108,7 @@ sealed class W154Draft : IDisposable
     }
 }
 
-static class W154File
+public static class W154File
 {
     public static int[] Write(string path, int frameUs, IReadOnlyList<byte[]> bodies, Stream? pcm = null, int sampleRate = 0)
     {

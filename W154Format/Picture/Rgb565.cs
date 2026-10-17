@@ -1,6 +1,6 @@
-namespace W154Convert;
+namespace W154Format;
 
-static class Rgb565
+public static class Rgb565
 {
     public static ushort Pack(byte r, byte g, byte b) =>
         (ushort)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
