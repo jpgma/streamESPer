@@ -25,3 +25,13 @@ dotnet publish W154Convert -c Release
 ```
 
 O processo sai com 0 quando o pior segundo fica em até 16 Mbit/s. Acima disso o arquivo ainda é gravado e a saída é 2, a menos que `--allow-over-budget` seja passado.
+
+## Player no VLC
+
+O plugin em `vlc-w154` abre um `.w154` no VLC 3.0.24: vídeo RGB565 e, quando o arquivo traz, PCM mono no mesmo relógio. Compilar e instalar em `plugins\demux`:
+
+```text
+powershell -File vlc-w154/build.ps1
+```
+
+No VLC, Arquivo > Abrir, ou `vlc --demux w154 video.w154`.

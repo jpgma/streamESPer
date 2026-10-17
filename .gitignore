@@ -6,3 +6,5 @@ obj/
 TestResults/
 artifacts/
 tools/ffmpeg/*.zip
+vlc-w154/.cache/
+vlc-w154/out/
