@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Port
 )
 
@@ -10,6 +10,13 @@ $export = Join-Path $env:IDF_PATH "export.bat"
 if (-not (Test-Path $export)) {
     Write-Error "ESP-IDF export.bat não está em $($env:IDF_PATH)"
 }
+. (Join-Path $PSScriptRoot "hotspot_secrets.ps1")
+$secretsPath = Join-Path $PSScriptRoot "w154\main\wifi_secrets.h"
+$helloPort = Get-HelloPortFromSecrets $secretsPath
+$hot = Get-RunningHotspot
+Write-WifiSecrets -Path $secretsPath -Ssid $hot.Ssid -Passphrase $hot.Passphrase -Gateway $hot.Gateway -HelloPort $helloPort
+Write-Host "wifi $($hot.Ssid)  gateway $($hot.Gateway)  hello $helloPort"
+
 if (-not $Port) {
     $devices = @(Get-CimInstance Win32_PnPEntity | Where-Object { $_.DeviceID -match 'VID_303A' -and $_.Name -match '\(COM\d+\)' })
     if ($devices.Count -eq 0) {

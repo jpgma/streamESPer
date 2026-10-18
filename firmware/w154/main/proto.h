@@ -32,7 +32,7 @@
 #define BAND_COUNT 30
 #define BAND_BYTES (240 * BAND_ROWS)
 #define PALETTE_COLORS 256
-#define RING_SLOTS 128
+#define RING_SLOTS 512
 
 static inline uint16_t rd_u16(const uint8_t *p)
 {

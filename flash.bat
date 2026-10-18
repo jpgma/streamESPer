@@ -46,8 +46,8 @@ exit /b 1
 
 :run
 if defined PORT (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0flash.ps1" -Port "%PORT%"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0firmware\flash.ps1" -Port "%PORT%"
 ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0flash.ps1"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0firmware\flash.ps1"
 )
 exit /b %ERRORLEVEL%

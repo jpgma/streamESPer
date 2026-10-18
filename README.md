@@ -18,6 +18,13 @@ dotnet run --project W154Convert -- --input video.mp4 --fps 24 --fit contain
 dotnet run --project W154Convert -- --input video.mp4 --sample-rate 16000 --no-audio
 ```
 
+`build.bat --converter` grava o Release em `W154Convert\bin\Release`. `w154convert.bat` executa esse exe e repassa os argumentos.
+
+```text
+build.bat --converter
+w154convert.bat --input video.mp4 --fps 24 --fit contain
+```
+
 Publicar o exe nativo:
 
 ```text
@@ -40,10 +47,14 @@ No VLC, Arquivo > Abrir, ou `vlc --demux w154 video.w154`.
 
 A API lê uma pasta de `.w154` e empurra o arquivo escolhido para o painel. O conceito está em [docs/api-w154.md](docs/api-w154.md). O player do device está em [docs/firmware-w154.md](docs/firmware-w154.md).
 
+`build.bat` gera os dois Release. `build.bat --api` gera só a API. `w154stream.bat` abre outra console, publica o `WIFI_SSID` de `wifi_secrets.h` num hotspot 2.4 GHz com uma senha UUID nova e sobe o exe Release. A console de origem volta na hora. Com esse hotspot no ar, `flash.bat` grava no firmware o SSID, essa senha e o gateway dessa instância.
+
 ```text
+build.bat
+w154stream.bat --dir .
 dotnet run --project W154Stream -- --dir .
 dotnet run --project W154Stream -- --selftest
-powershell -File firmware/flash.ps1
+flash.bat
 ```
 
-`POST http://localhost:5090/play` com `{ "name": "clip.w154" }` começa o envio. O device precisa de `wifi_secrets.h` apontando para o IP do host.
+`POST http://localhost:5090/play` com `{ "name": "clip.w154" }` começa o envio. O `flash` seguinte leva o Wi-Fi do hotspot que está no ar.

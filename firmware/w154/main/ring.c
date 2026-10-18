@@ -2,10 +2,16 @@
 
 #include <string.h>
 
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "proto.h"
 #include "state.h"
+
+static const char *TAG = "w154";
+
+/* Datagramas ainda no ar quando o credit diz que a fila lotou. */
+#define RING_SLOT_MARGIN 32
 
 typedef struct {
     uint32_t offset;
@@ -30,6 +36,7 @@ static int s_qn;
 static int s_partial;
 static int s_skip_key;
 static uint32_t s_expect;
+static uint32_t s_skipped;
 static SemaphoreHandle_t s_mu;
 
 static uint32_t tail_room(void)
@@ -115,6 +122,7 @@ void ring_clear(void)
     s_partial = 0;
     s_skip_key = 0;
     s_expect = 0;
+    s_skipped = 0;
     memset(s_q, 0, sizeof(s_q));
     atomic_store(&g.expect_seq, 0);
     if (s_mu) {
@@ -130,6 +138,11 @@ uint32_t ring_capacity(void)
 uint32_t ring_free_bytes(void)
 {
     xSemaphoreTake(s_mu, portMAX_DELAY);
+    /* Fila vazia: o próximo body recomeça do zero. O sliver no fim do buffer não é o espaço livre. */
+    if (!s_partial && s_qn == 0) {
+        xSemaphoreGive(s_mu);
+        return s_cap;
+    }
     uint32_t room = tail_room();
     if (!s_partial && !s_wrapped && s_qn > 0 && s_head > room) {
         room = s_head;
@@ -140,7 +153,7 @@ uint32_t ring_free_bytes(void)
         room = tail_room();
         room = room > reserve ? room - reserve : 0;
     }
-    if (s_qn >= RING_SLOTS) {
+    if (s_qn + RING_SLOT_MARGIN >= RING_SLOTS) {
         room = 0;
     }
     xSemaphoreGive(s_mu);
@@ -160,13 +173,18 @@ int ring_video(uint32_t seq, uint32_t frame, uint16_t frag, uint16_t frag_count,
     }
     xSemaphoreTake(s_mu, portMAX_DELAY);
     int rc = 1;
+    int warn = 0;
+    uint32_t warn_seq = seq;
+    uint32_t warn_expect = s_expect;
     if (seq < s_expect) {
         goto out;
     }
     if (seq > s_expect) {
         rewind_partial();
+        warn = !s_skip_key;
         s_skip_key = 1;
         s_expect = seq;
+        s_skipped++;
     }
     if (s_skip_key) {
         if (frag != 0 || len < 2 || (payload[0] & 0x02) == 0) {
@@ -177,7 +195,9 @@ int ring_video(uint32_t seq, uint32_t frame, uint16_t frag, uint16_t frag_count,
     }
     if (!s_partial) {
         if (frag != 0) {
+            warn = !s_skip_key;
             s_skip_key = 1;
+            s_skipped++;
             note_expect(seq);
             goto out;
         }
@@ -186,7 +206,9 @@ int ring_video(uint32_t seq, uint32_t frame, uint16_t frag, uint16_t frag_count,
             need = ASM_BYTES;
         }
         if (begin_slot(frame, frag_count, need) != 0) {
+            warn = !s_skip_key;
             s_skip_key = 1;
+            s_skipped++;
             note_expect(seq);
             goto out;
         }
@@ -194,13 +216,17 @@ int ring_video(uint32_t seq, uint32_t frame, uint16_t frag, uint16_t frag_count,
     slot_t *slot = &s_q[s_qt];
     if (frame != slot->frame || frag != slot->got || frag_count != slot->frags) {
         rewind_partial();
+        warn = !s_skip_key;
         s_skip_key = 1;
+        s_skipped++;
         note_expect(seq);
         goto out;
     }
     if (tail_room() < len || slot->length + len > ASM_BYTES) {
         rewind_partial();
+        warn = !s_skip_key;
         s_skip_key = 1;
+        s_skipped++;
         note_expect(seq);
         goto out;
     }
@@ -223,7 +249,19 @@ int ring_video(uint32_t seq, uint32_t frame, uint16_t frag, uint16_t frag_count,
     rc = 0;
 out:
     xSemaphoreGive(s_mu);
+    if (warn) {
+        ESP_LOGW(TAG, "video seq %u esperava %u", (unsigned)warn_seq, (unsigned)warn_expect);
+    }
     return rc;
+}
+
+void ring_diag(uint32_t *queued, uint32_t *skipped)
+{
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    *queued = (uint32_t)s_qn;
+    *skipped = s_skipped;
+    s_skipped = 0;
+    xSemaphoreGive(s_mu);
 }
 
 int ring_take(uint8_t **scratch, uint32_t *len, uint32_t *frame)

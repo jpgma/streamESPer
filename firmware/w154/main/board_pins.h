@@ -14,6 +14,7 @@
 #define PIN_LCD_DC 45
 #define PIN_LCD_RST 40
 #define PIN_LCD_BL 46
+#define PIN_PWR 5
 
 #define LCD_SPI_MODE 3
 #define LCD_PCLK_HZ (80 * 1000 * 1000)

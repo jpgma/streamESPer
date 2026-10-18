@@ -14,6 +14,8 @@ static class Session
     public const uint FlagUnderrun = 1u << 30;
     public const uint FlagPaused = 1u << 31;
     public const uint FrameMask = 0x3FFFFFFF;
-    public const int AudioLeadUs = 80_000;
+    public const int AudioLeadUs = 350_000;
     public const int SeqWindow = 4096;
+    // O socket de vídeo do firmware cabe em 32 KiB. Rajada maior descarta UDP e o crédito avança no salto.
+    public const int FlightBytes = 20 * 1456;
 }

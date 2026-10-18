@@ -19,5 +19,5 @@ Player do painel Waveshare. C, sem C++. Comentário em pt-BR no formato `[fn] o 
 
 ## Rede
 
-- `wifi_secrets.h` não entra no git. Copiar de `wifi_secrets.example.h`.
+- `wifi_secrets.h` não entra no git. A API lê o SSID desse arquivo. Cada lançamento gera um UUID como senha. `flash.bat` regrava o header com o hotspot que está no ar.
 - Datagramas de vídeo e áudio como em `docs/formato-w154.md`. Sessão como em `docs/api-w154.md`.

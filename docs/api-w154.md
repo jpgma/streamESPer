@@ -18,6 +18,8 @@ dotnet run --project W154Stream -- --selftest
 | `--http` | 5090 | HTTP do operador |
 | `--hello` | 5091 | UDP que recebe hello e credit |
 
+`w154stream.bat` na raiz abre outra console e sobe o Release gerado por `build.bat --api`. O hotspot 2.4 GHz usa o `WIFI_SSID` de `firmware/w154/main/wifi_secrets.h` e uma senha UUID nova a cada lançamento. O script grava essa senha e o gateway ICS no header. `flash.bat`, com esse hotspot ligado, regrava o mesmo header a partir da instância em execução e compila o firmware com esses valores. Fechar essa console, ou Ctrl+C nela, derruba o hotspot. `--dir`, `--http` e `--hello` são os mesmos desta página.
+
 Publicar nativo:
 
 ```text

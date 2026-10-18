@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "audio.h"
+#include "backlight.h"
 #include "board_pins.h"
 #include "decode.h"
 #include "driver/gpio.h"
@@ -111,13 +112,6 @@ static void panel_init(esp_lcd_panel_handle_t *panel, esp_lcd_panel_io_handle_t 
     ESP_ERROR_CHECK(gpio_config(&bat));
     gpio_set_level(PIN_BAT_EN, 1);
 
-    gpio_config_t bl = {
-        .pin_bit_mask = 1ull << PIN_LCD_BL,
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    ESP_ERROR_CHECK(gpio_config(&bl));
-    gpio_set_level(PIN_LCD_BL, 1);
-
     spi_bus_config_t buscfg = {
         .mosi_io_num = PIN_LCD_MOSI,
         .miso_io_num = PIN_LCD_MISO,
@@ -162,6 +156,7 @@ void app_main(void)
     esp_lcd_panel_io_handle_t io = NULL;
     panel_init(&panel, &io);
     present_init(panel, io);
+    backlight_start(panel);
 
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port = I2C_NUM_0,
@@ -178,6 +173,6 @@ void app_main(void)
 
     ESP_ERROR_CHECK(xTaskCreatePinnedToCore(net_task, "w154_rx", 8192, NULL, 8, NULL, 0) == pdPASS ? ESP_OK : ESP_FAIL);
     ESP_ERROR_CHECK(xTaskCreatePinnedToCore(decode_task, "w154_dec", 8192, NULL, 5, NULL, 0) == pdPASS ? ESP_OK : ESP_FAIL);
-    ESP_ERROR_CHECK(xTaskCreatePinnedToCore(audio_task, "w154_aud", 4096, NULL, 6, NULL, 0) == pdPASS ? ESP_OK : ESP_FAIL);
+    ESP_ERROR_CHECK(xTaskCreatePinnedToCore(audio_task, "w154_aud", 4096, NULL, 10, NULL, 0) == pdPASS ? ESP_OK : ESP_FAIL);
     ESP_ERROR_CHECK(xTaskCreatePinnedToCore(present_task, "w154_pic", 4096, NULL, 7, NULL, 1) == pdPASS ? ESP_OK : ESP_FAIL);
 }

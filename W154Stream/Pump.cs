@@ -44,6 +44,7 @@ sealed class Pump : IHostedService
     uint _audioSeq;
     int _audioSample;
     bool _eosSent;
+    long _logAt;
 
     public Pump(string dir, int helloPort)
     {
@@ -228,11 +229,17 @@ sealed class Pump : IHostedService
                 sent = true;
             }
 
+            if (_joined && audioEp is not null && !paused && movie.Audio.Present)
+                sent |= SendAudio(movie, audioEp, playFrame);
+
             if (_joined && videoEp is not null)
                 sent |= SendVideo(movie, videoEp, ref free, ref expect);
 
-            if (_joined && audioEp is not null && !paused && movie.Audio.Present)
-                sent |= SendAudio(movie, audioEp, playFrame);
+            if (Environment.TickCount64 - _logAt >= 1000)
+            {
+                _logAt = Environment.TickCount64;
+                Console.WriteLine($"play {playFrame} sent {_videoFrame} free {free} aud {_audioSample} underrun {(_devUnderrun ? 1 : 0)}");
+            }
 
             if (!_eosSent && _videoFrame >= movie.FrameCount && AudioCaughtUp(movie))
             {
@@ -374,7 +381,8 @@ sealed class Pump : IHostedService
         long outstanding = _sentBody - acked;
         if (outstanding < 0)
             return false;
-        return outstanding + payload <= free;
+        uint budget = free < (uint)Session.FlightBytes ? free : (uint)Session.FlightBytes;
+        return outstanding + payload <= budget;
     }
 
     bool SendAudio(W154Movie movie, IPEndPoint ep, uint playFrame)

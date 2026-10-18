@@ -26,13 +26,16 @@ static int s_control = -1;
 static struct sockaddr_in s_host;
 static uint32_t s_audio_expect;
 static int s_saw_control;
+static atomic_int s_wifi_quiet;
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     if (base == WIFI_EVENT && (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
         atomic_store(&g.have_ip, 0);
-        esp_wifi_connect();
+        if (!atomic_load(&s_wifi_quiet)) {
+            esp_wifi_connect();
+        }
         return;
     }
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -66,6 +69,20 @@ static void wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+}
+
+void net_quiet(void)
+{
+    atomic_store(&s_wifi_quiet, 1);
+    atomic_store(&g.have_ip, 0);
+    esp_wifi_stop();
+}
+
+void net_wake(void)
+{
+    atomic_store(&s_wifi_quiet, 0);
+    esp_wifi_start();
+    esp_wifi_set_ps(WIFI_PS_NONE);
 }
 
 static int bind_udp(int port)
@@ -169,6 +186,9 @@ static void on_audio(const uint8_t *pkt, int n)
     if (seq < s_audio_expect) {
         return;
     }
+    if (seq > s_audio_expect) {
+        audio_note_gap();
+    }
     s_audio_expect = seq + 1;
     audio_push(pkt + SESSION_BYTES, nbytes);
 }
@@ -201,6 +221,7 @@ void net_task(void *arg)
     send_hello();
     int64_t next_credit = esp_timer_get_time();
     int64_t next_hello = esp_timer_get_time() + 1000000;
+    int64_t next_log = esp_timer_get_time() + 1000000;
     uint8_t buf[UDP_PACKET];
     for (;;) {
         fd_set set;
@@ -218,20 +239,35 @@ void net_task(void *arg)
         struct timeval tv = {.tv_sec = 0, .tv_usec = 20000};
         int ready = select(maxfd + 1, &set, NULL, NULL, &tv);
         if (ready > 0 && FD_ISSET(s_control, &set)) {
-            int n = recv(s_control, buf, sizeof(buf), 0);
-            if (n >= SESSION_BYTES && rd_u32(buf) == CONTROL_MAGIC) {
-                on_control(buf);
+            for (;;) {
+                int n = recv(s_control, buf, sizeof(buf), MSG_DONTWAIT);
+                if (n < 0) {
+                    break;
+                }
+                if (n >= SESSION_BYTES && rd_u32(buf) == CONTROL_MAGIC) {
+                    on_control(buf);
+                }
             }
         }
         if (ready > 0 && FD_ISSET(s_video, &set)) {
-            int n = recv(s_video, buf, sizeof(buf), 0);
-            if (n > SESSION_BYTES) {
-                on_video(buf, n);
+            for (;;) {
+                int n = recv(s_video, buf, sizeof(buf), MSG_DONTWAIT);
+                if (n < 0) {
+                    break;
+                }
+                if (n > SESSION_BYTES) {
+                    on_video(buf, n);
+                }
             }
         }
         if (ready > 0 && FD_ISSET(s_audio, &set)) {
-            int n = recv(s_audio, buf, sizeof(buf), 0);
-            on_audio(buf, n);
+            for (;;) {
+                int n = recv(s_audio, buf, sizeof(buf), MSG_DONTWAIT);
+                if (n < 0) {
+                    break;
+                }
+                on_audio(buf, n);
+            }
         }
         int64_t now = esp_timer_get_time();
         if (now >= next_credit) {
@@ -241,6 +277,13 @@ void net_task(void *arg)
         if (now >= next_hello) {
             send_hello();
             next_hello = now + (s_saw_control ? 5000000 : 1000000);
+        }
+        if (now >= next_log) {
+            uint32_t queued = 0;
+            uint32_t skipped = 0;
+            ring_diag(&queued, &skipped);
+            ESP_LOGI(TAG, "rx slots %u skip %u", (unsigned)queued, (unsigned)skipped);
+            next_log = now + 1000000;
         }
     }
 }

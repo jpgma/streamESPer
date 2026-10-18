@@ -14,5 +14,5 @@ int ring_video(uint32_t seq, uint32_t frame, uint16_t frag, uint16_t frag_count,
 /* [ring_take] Copia o body mais antigo para scratch. 1 se havia body. */
 int ring_take(uint8_t **scratch, uint32_t *len, uint32_t *frame);
 
-/* [ring_is_blocked] 1 enquanto um body completo ainda não cabe no ring. */
-int ring_is_blocked(void);
+/* [ring_diag] Bodies na fila e quantos datagramas foram pulados desde a última leitura. */
+void ring_diag(uint32_t *queued, uint32_t *skipped);
