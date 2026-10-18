@@ -12,14 +12,15 @@ Player do painel Waveshare. C, sem C++. Comentário em pt-BR no formato `[fn] o 
 
 - Sem `malloc` depois do boot. Ring, quadros indexados e o buffer de montagem saem de um carve na PSRAM. Bounce e ring de I2S ficam na DRAM interna.
 - Core 0: Wi-Fi, sockets, credit, decode e I2S. Core 1: expand e SPI. O core 1 não chama `recv`.
-- Bounce duplo de 8 linhas (`2 × 8 × 240 × 2` bytes), `DMA_ATTR`, na DRAM interna. Band limpa não gera SPI. Delta vazio não redesenha.
+- Bounce duplo de 8 linhas (`2 × 8 × 240 × 2` bytes), `DMA_ATTR`, na DRAM interna. Linhas sujas consecutivas saem juntas, no máximo 8. As linhas 0..15 vão ao vidro para os dígitos de fps. Delta vazio não redesenha o resto.
 - O painel sai por `spi_device_polling_transmit` (CASET `0x2A`, RASET `0x2B`, RAMWR `0x2C`). Sem contagem de DMA em voo por cima de `draw_bitmap`: isso trava o present depois de ~10 s a 24 fps.
 - `free_bytes` é a cauda livre. Fila vazia anuncia o ring inteiro. Não descontar os bytes que ainda faltam no body parcial.
 - Dois quadros indexados. Publicação por índice atômico, sem fila de frames.
-- O relógio só solta com cerca de 3 s de bodies no ring (24–72 quadros) e para de novo abaixo de 8, até essa folga voltar. A conta é `ring_queued` mais os dois slots. Não use `ring_diag` para isso: ele zera o contador de salto. Credit sai depois de cada rajada de vídeo e no máximo a cada 10 ms. A janela no ar continua em 20 datagramas.
+- O relógio só solta com cerca de 3 s de bodies no ring e para de novo abaixo de 8, até essa folga voltar. A meta não passa de `cap / 59110` nem de `512 - 32` slots. `frame_us` abaixo de 12500 é recusado. A conta é `ring_queued` mais os dois slots. Não use `ring_diag` para isso: ele zera o contador de salto. Credit sai depois de cada rajada de vídeo e no máximo a cada 10 ms. A janela no ar continua em 20 datagramas.
 - `begin_slot` reserva `frag_count * 1456` contíguos. Sem isso o log `video seq N esperava N` é recusa de slot, e `skip_key` descarta até o próximo keyframe. Buraco de UDP mostra dois `seq` diferentes.
 - Underrun pausa o relógio, desliga o I2S na hora e continua recebendo. Sem nenhum body por 300 ms, ou sem IP, a tela fica preta com a marca piscando e o PA desce. Rebuffer com dado na fila não usa essa tela. Pause e eos também não. Buraco de `seq` descarta até o próximo keyframe.
-- Áudio: PCM mono de 400 ms na DRAM interna. PA do GPIO7 no pause, no reset, sem IP, com o backlight apagado e na marca de desconexão. Sem ES7210.
+- Decode por linha (cru, RLE, resíduo, delta à esquerda). Sem LZ4 e sem ADPCM. O scratch cabe 59110 bytes.
+- Áudio: PCM s16 mono de 400 ms na DRAM interna, já expandido pelo host. PA do GPIO7 no pause, no reset, sem IP, com o backlight apagado e na marca de desconexão. Sem ES7210.
 
 ## Rede
 

@@ -16,15 +16,61 @@ static class IndexMap
         63, 31, 55, 23, 61, 29, 53, 21,
     ];
 
-    public static byte[] Map(ReadOnlySpan<byte> rgb, Palette palette, DitherMode dither)
+    public static byte[] Map(
+        ReadOnlySpan<byte> rgb,
+        Palette palette,
+        DitherMode dither,
+        ReadOnlySpan<byte> previous = default,
+        ReadOnlySpan<ushort> previousColors = default,
+        float hold = 0)
     {
         if (rgb.Length < PictureContract.Pixels * 3)
             throw new W154Exception("quadro RGB24 inválido.");
-        if (dither == DitherMode.Fs)
-            return FloydSteinberg(rgb, palette);
-        if (dither == DitherMode.Ordered)
-            return Ordered(rgb, palette);
-        return Nearest(rgb, palette);
+        byte[] dst = dither switch
+        {
+            DitherMode.Fs => FloydSteinberg(rgb, palette),
+            DitherMode.Ordered => Ordered(rgb, palette),
+            _ => Nearest(rgb, palette),
+        };
+        if (hold > 0 && previous.Length >= PictureContract.Pixels && previousColors.Length > 0)
+            ApplyHold(rgb, dst, palette, previous, previousColors, hold);
+        return dst;
+    }
+
+    static void ApplyHold(
+        ReadOnlySpan<byte> rgb,
+        byte[] dst,
+        Palette palette,
+        ReadOnlySpan<byte> previous,
+        ReadOnlySpan<ushort> previousColors,
+        float hold)
+    {
+        for (int i = 0; i < PictureContract.Pixels; i++)
+        {
+            int prev = previous[i];
+            if (prev >= previousColors.Length)
+                continue;
+            ushort prevColor = previousColors[prev];
+            int p = i * 3;
+            ushort src = Rgb565.Pack(rgb[p], rgb[p + 1], rgb[p + 2]);
+            float chosen = ColorSpace.Distance(src, palette.Entries[dst[i]]);
+            if (ColorSpace.Distance(src, prevColor) > chosen + hold)
+                continue;
+            int slot = SlotOf(palette, prevColor);
+            if (slot >= 0)
+                dst[i] = (byte)slot;
+        }
+    }
+
+    static int SlotOf(Palette palette, ushort color)
+    {
+        for (int i = 0; i < palette.Count; i++)
+        {
+            if (palette.Entries[i] == color)
+                return i;
+        }
+
+        return -1;
     }
 
     static byte[] Nearest(ReadOnlySpan<byte> rgb, Palette palette)

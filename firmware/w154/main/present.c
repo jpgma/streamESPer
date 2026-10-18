@@ -119,7 +119,7 @@ static void ship(int y, int rows, const uint16_t *pixels)
     spi_device_release_bus(dev);
 }
 
-static void overlay_fps(uint16_t *dst, int band)
+static void overlay_fps(uint16_t *dst, int y0, int rows)
 {
     int fps = s_fps_draw;
     if (fps < 0) {
@@ -128,12 +128,11 @@ static void overlay_fps(uint16_t *dst, int band)
     if (fps > 999) {
         fps = 999;
     }
-    int y_band = band * BAND_ROWS;
     int x0 = SCREEN_WIDTH - FPS_COLS - 2;
     int y_top = 1;
     int y_bot = 1 + FPS_DH;
-    for (int row = 0; row < BAND_ROWS; row++) {
-        int y = y_band + row;
+    for (int row = 0; row < rows; row++) {
+        int y = y0 + row;
         if (y < y_top || y >= y_bot) {
             continue;
         }
@@ -163,10 +162,10 @@ static void overlay_fps(uint16_t *dst, int band)
                 }
                 for (int sy = 0; sy < FPS_SCALE; sy++) {
                     int y = y_top + grow * FPS_SCALE + sy;
-                    if (y < y_band || y >= y_band + BAND_ROWS) {
+                    if (y < y0 || y >= y0 + rows) {
                         continue;
                     }
-                    uint16_t *line = dst + (y - y_band) * SCREEN_WIDTH;
+                    uint16_t *line = dst + (y - y0) * SCREEN_WIDTH;
                     for (int sx = 0; sx < FPS_SCALE; sx++) {
                         line[x0 + origin + gcol * FPS_SCALE + sx] = 0xFFFF;
                     }
@@ -176,31 +175,42 @@ static void overlay_fps(uint16_t *dst, int band)
     }
 }
 
-static void expand_band(const frame_slot_t *frame, int band)
+static void expand_rows(const frame_slot_t *frame, int y0, int rows)
 {
     uint16_t *dst = s_bounce[s_bounce_slot];
-    int y0 = band * BAND_ROWS;
-    for (int row = 0; row < BAND_ROWS; row++) {
+    for (int row = 0; row < rows; row++) {
         const uint8_t *src = frame->index + (y0 + row) * SCREEN_WIDTH;
         uint16_t *out = dst + row * SCREEN_WIDTH;
         for (int x = 0; x < SCREEN_WIDTH; x++) {
             out[x] = frame->palette[src[x]];
         }
     }
-    if (band < 2 && s_fps_draw > 0) {
-        overlay_fps(dst, band);
+    if (s_fps_draw > 0 && y0 < 16) {
+        overlay_fps(dst, y0, rows);
     }
-    ship(y0, BAND_ROWS, dst);
+    ship(y0, rows, dst);
     s_bounce_slot ^= 1;
 }
 
 static void present_frame(const frame_slot_t *frame)
 {
-    for (int band = 0; band < BAND_COUNT; band++) {
-        if (!s_repaint && band >= 2 && !row_dirty(frame->rowmask, band * BAND_ROWS)) {
+    int y = 0;
+    while (y < SCREEN_HEIGHT) {
+        int show = s_repaint || y < 16 || row_dirty(frame->rowmask, y);
+        if (!show) {
+            y++;
             continue;
         }
-        expand_band(frame, band);
+        int rows = 1;
+        while (y + rows < SCREEN_HEIGHT && rows < BAND_ROWS) {
+            int next = s_repaint || (y + rows) < 16 || row_dirty(frame->rowmask, y + rows);
+            if (!next) {
+                break;
+            }
+            rows++;
+        }
+        expand_rows(frame, y, rows);
+        y += rows;
     }
     s_repaint = 0;
 }
@@ -247,19 +257,27 @@ static void paint_link(int show)
     }
 }
 
-/* [buffer_goal] Bodies para soltar o relógio. 3 s, entre 24 e 72 quadros. */
+/* [buffer_goal] Cerca de 3 s, sem passar do que um body máximo cabe no ring. */
 static int buffer_goal(void)
 {
     uint32_t frame_us = atomic_load(&g.frame_us);
-    if (frame_us < 16667 || frame_us > 1000000) {
+    if (frame_us < 12500 || frame_us > 1000000) {
         frame_us = 41667;
     }
     int frames = (int)(3000000u / frame_us);
     if (frames < 24) {
         frames = 24;
     }
-    if (frames > 72) {
-        frames = 72;
+    uint32_t cap = ring_capacity();
+    int fit = cap < ASM_BYTES ? 24 : (int)(cap / ASM_BYTES);
+    if (fit > RING_SLOTS - 32) {
+        fit = RING_SLOTS - 32;
+    }
+    if (fit < 24) {
+        fit = 24;
+    }
+    if (frames > fit) {
+        frames = fit;
     }
     return frames;
 }

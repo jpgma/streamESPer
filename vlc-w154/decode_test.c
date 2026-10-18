@@ -37,22 +37,22 @@ static uint32_t read_u32_at(const uint8_t *p)
 
 static uint8_t *build_keyframe(size_t *out_len)
 {
-    size_t len = 8 + W154_PALETTE_COLORS * 2 + (size_t)W154_BAND_COUNT * (4 + W154_BAND_BYTES) + 4;
+    size_t len = W154_PREAMBLE + W154_PALETTE_COLORS * 2 + (size_t)W154_ROW_COUNT * (4 + W154_ROW_BYTES) + 4;
     uint8_t *body = calloc(1, len);
     if (body == NULL)
         return NULL;
     put_u16(body, 3);
-    put_u16(body + 2, W154_BAND_COUNT);
-    put_u32(body + 4, W154_KEYFRAME_MASK);
+    put_u16(body + 2, W154_ROW_COUNT);
+    memset(body + 4, 0xFF, W154_ROW_MASK);
     for (int i = 0; i < W154_PALETTE_COLORS; i++)
-        put_u16(body + 8 + i * 2, (uint16_t)i);
-    size_t pos = 8 + W154_PALETTE_COLORS * 2;
-    for (int band = 0; band < W154_BAND_COUNT; band++) {
+        put_u16(body + W154_PREAMBLE + i * 2, (uint16_t)i);
+    size_t pos = W154_PREAMBLE + W154_PALETTE_COLORS * 2;
+    for (int row = 0; row < W154_ROW_COUNT; row++) {
         body[pos++] = 0;
         body[pos++] = 0;
-        put_u16(body + pos, W154_BAND_BYTES);
+        put_u16(body + pos, W154_ROW_BYTES);
         pos += 2;
-        pos += W154_BAND_BYTES;
+        pos += W154_ROW_BYTES;
     }
     put_u32(body + pos, w154_crc32(body, pos));
     *out_len = len;
@@ -61,18 +61,18 @@ static uint8_t *build_keyframe(size_t *out_len)
 
 static uint8_t *build_delta_band0(size_t *out_len)
 {
-    size_t len = 8 + 4 + W154_BAND_BYTES + 4;
+    size_t len = W154_PREAMBLE + 4 + W154_ROW_BYTES + 4;
     uint8_t *body = calloc(1, len);
     if (body == NULL)
         return NULL;
     put_u16(body, 0);
     put_u16(body + 2, 1);
-    put_u32(body + 4, 1u);
-    body[8] = 0;
-    body[9] = 0;
-    put_u16(body + 10, W154_BAND_BYTES);
-    memset(body + 12, 7, W154_BAND_BYTES);
-    size_t pos = 12 + W154_BAND_BYTES;
+    body[4] = 1;
+    body[W154_PREAMBLE] = 0;
+    body[W154_PREAMBLE + 1] = 0;
+    put_u16(body + W154_PREAMBLE + 2, W154_ROW_BYTES);
+    memset(body + W154_PREAMBLE + 4, 7, W154_ROW_BYTES);
+    size_t pos = W154_PREAMBLE + 4 + W154_ROW_BYTES;
     put_u32(body + pos, w154_crc32(body, pos));
     *out_len = len;
     return body;
@@ -121,12 +121,12 @@ static int wrap_file(byte_buf *file, const uint8_t *body0, size_t len0, const ui
     header[1] = '1';
     header[2] = '5';
     header[3] = '4';
-    put_u16(header + 4, 1);
+    put_u16(header + 4, 2);
     put_u16(header + 6, W154_HEADER_SIZE);
     put_u16(header + 8, W154_WIDTH);
     put_u16(header + 10, W154_HEIGHT);
-    put_u16(header + 12, 8);
-    put_u16(header + 14, W154_BAND_COUNT);
+    put_u16(header + 12, 1);
+    put_u16(header + 14, W154_ROW_COUNT);
     put_u32(header + 16, 41667);
     put_u32(header + 20, 2);
     put_u32(header + 28, audio_offset);
@@ -144,7 +144,7 @@ static int wrap_file(byte_buf *file, const uint8_t *body0, size_t len0, const ui
     put_u32(preamble, pcm_bytes);
     put_u32(preamble + 4, sample_rate);
     put_u16(preamble + 8, 1);
-    put_u16(preamble + 10, 0);
+    put_u16(preamble + 10, 1);
     put_u32(preamble + 12, w154_crc32(pcm, pcm_bytes));
     return buf_add(file, preamble, sizeof preamble) != 0 || buf_add(file, pcm, pcm_bytes) != 0 ? -1 : 0;
 }
@@ -191,11 +191,11 @@ static int indexes_match(const uint8_t *file, size_t len, int with_audio)
 
     if (decode_at(&picture, file, len, offset1, 1, info.gop) != 0)
         return -1;
-    for (int i = 0; i < W154_BAND_BYTES; i++) {
+    for (int i = 0; i < W154_ROW_BYTES; i++) {
         if (picture.index[i] != 7)
             return -1;
     }
-    if (picture.index[W154_BAND_BYTES] != 0)
+    if (picture.index[W154_ROW_BYTES] != 0)
         return -1;
 
     rgb = malloc((size_t)W154_PIXELS * 2u);
@@ -219,7 +219,7 @@ static int indexes_match(const uint8_t *file, size_t len, int with_audio)
     w154_audio_info audio;
     if (w154_parse_audio(file + info.audio_offset, info.frame_count, info.frame_us, &audio) != 0)
         return -1;
-    if (audio.sample_rate != 48000 || audio.sample_count != 4000 || audio.pcm_bytes != 8000)
+    if (audio.sample_rate != 48000 || audio.sample_count != 4000 || audio.pcm_bytes != w154_ima_payload_bytes(4000))
         return -1;
     if ((size_t)info.audio_offset + 16u + audio.pcm_bytes != len)
         return -1;
@@ -258,32 +258,27 @@ static void check_vectors(void)
     const uint8_t digits[] = "123456789";
     expect(w154_crc32(digits, 9) == 0xCBF43926u, "crc32 de 123456789");
 
-    uint8_t rle[30];
-    for (int i = 0; i < 15; i++) {
-        rle[i * 2] = 0xFF;
-        rle[i * 2 + 1] = 0x07;
-    }
-    uint8_t band[W154_BAND_BYTES];
+    uint8_t rle[4] = {0xFF, 0x07, 0xEF, 0x07};
+    uint8_t band[W154_ROW_BYTES];
     expect(w154_rle_decode(rle, sizeof rle, band, sizeof band) == 0, "RLE de indice 7");
     int flat = 1;
-    for (int i = 0; i < W154_BAND_BYTES; i++) {
+    for (int i = 0; i < W154_ROW_BYTES; i++) {
         if (band[i] != 7)
             flat = 0;
     }
-    expect(flat, "RLE preenche 1920 bytes");
+    expect(flat, "RLE preenche 240 bytes");
 
-    uint8_t lz4[11];
-    lz4[0] = 0xA0;
-    for (int i = 0; i < 10; i++)
-        lz4[1 + i] = (uint8_t)(i + 1);
-    uint8_t literals[10];
-    expect(w154_lz4_decode(lz4, sizeof lz4, literals, sizeof literals) == 0, "LZ4 so de literais");
-    int literals_ok = 1;
-    for (int i = 0; i < 10; i++) {
-        if (literals[i] != (uint8_t)(i + 1))
-            literals_ok = 0;
-    }
-    expect(literals_ok, "LZ4 copia os literais");
+    int16_t silence[32];
+    memset(silence, 0, sizeof silence);
+    uint8_t silence_adpcm[64];
+    uint32_t silence_bytes = w154_ima_payload_bytes(32);
+    expect(silence_bytes <= sizeof silence_adpcm
+               && w154_ima_encode(silence, 32, silence_adpcm, silence_bytes) == 0,
+           "ADPCM de silêncio");
+    int16_t silence_back[32];
+    expect(w154_ima_decode_block(silence_adpcm, 32, silence_back) == 0, "decode do silêncio");
+    int silence_ok = memcmp(silence, silence_back, sizeof silence) == 0;
+    expect(silence_ok, "silêncio IMA volta a zero");
 
     expect(w154_sample_count(2, 41667, 48000) == 4000, "dois quadros a 48000 Hz");
     expect(w154_sample_count(24, 41667, 48000) == 48000, "um segundo a 48000 Hz");
@@ -302,7 +297,7 @@ int main(int argc, char **argv)
     size_t delta_len = 0;
     uint8_t *key = build_keyframe(&key_len);
     uint8_t *delta = build_delta_band0(&delta_len);
-    expect(key != NULL && delta != NULL && key_len == 58244, "keyframe cru de 58244");
+    expect(key != NULL && delta != NULL && key_len == 59110, "keyframe cru de 59110");
 
     w154_picture bare;
     memset(&bare, 0, sizeof bare);
@@ -311,18 +306,19 @@ int main(int argc, char **argv)
 
     byte_buf video = {0};
     byte_buf with_audio = {0};
-    uint8_t pcm[8000];
-    for (int i = 0; i < 4000; i++) {
-        pcm[i * 2] = 0x11;
-        pcm[i * 2 + 1] = 0x00;
-    }
+    int16_t samples[4000];
+    for (int i = 0; i < 4000; i++)
+        samples[i] = 0x0011;
+    uint32_t adpcm_len = w154_ima_payload_bytes(4000);
+    uint8_t *adpcm = calloc(1, adpcm_len == 0 ? 1 : adpcm_len);
+    int encoded = adpcm != NULL && w154_ima_encode(samples, 4000, adpcm, adpcm_len) == 0;
 
     if (key != NULL && delta != NULL) {
         expect(wrap_file(&video, key, key_len, delta, delta_len, NULL, 0, 0) == 0, "arquivo so de video");
         expect(indexes_match(video.data, video.len, 0) == 0, "decode do arquivo so de video");
-        expect(wrap_file(&with_audio, key, key_len, delta, delta_len, pcm, sizeof pcm, 48000) == 0,
-               "arquivo com PCM");
-        expect(indexes_match(with_audio.data, with_audio.len, 1) == 0, "decode do arquivo com PCM");
+        expect(encoded && wrap_file(&with_audio, key, key_len, delta, delta_len, adpcm, adpcm_len, 48000) == 0,
+               "arquivo com ADPCM");
+        expect(indexes_match(with_audio.data, with_audio.len, 1) == 0, "decode do arquivo com ADPCM");
     }
 
     if (argc >= 2 && with_audio.data != NULL) {
@@ -339,6 +335,7 @@ int main(int argc, char **argv)
 
     free(key);
     free(delta);
+    free(adpcm);
     free(video.data);
     free(with_audio.data);
 

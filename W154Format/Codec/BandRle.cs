@@ -43,7 +43,7 @@ public static class BandRle
 
     public static bool TryDecode(ReadOnlySpan<byte> src, Span<byte> dst)
     {
-        if (dst.Length != PictureContract.BandBytes)
+        if (dst.Length == 0)
             return false;
 
         int ip = 0;

@@ -6,26 +6,27 @@ alwaysApply: false
 
 # Conversor `.w154`
 
-O projeto `W154Convert` grava o arquivo descrito no guia 12 do painel Waveshare (240×240, índices, bandas de 8 linhas, paleta RGB565). A API de streaming é outro projeto da solution `StreamESPer` e não herda estas regras. CRC, RLE, LZ4 e o container moram em `W154Format`. Este projeto não reimplementa codec.
+O projeto `W154Convert` grava o arquivo da versão 2 (240×240, um record por linha, paleta RGB565). A API de streaming é outro projeto da solution `StreamESPer` e não herda estas regras. CRC, RLE, IMA ADPCM e o container moram em `W154Format`. Este projeto não reimplementa codec.
 
 ## Projeto
 
 - `net10.0`, sem `PackageReference`. O formato entra por `ProjectReference` a `W154Format`. CLI, ffmpeg e quantização ficam aqui.
 - `PublishAot` e `InvariantGlobalization` permanecem ligados. Não usar reflexão, `Regex` interpretado nem APIs que exijam ICU.
-- Identificadores, flags e nomes de campo ficam em inglês (`frame_us`, `band_mask`, `body_bytes`, `keyframe`, `gop`, `cover`, `contain`).
+- Identificadores, flags e nomes de campo ficam em inglês (`frame_us`, `row_mask`, `body_bytes`, `keyframe`, `gop`, `cover`, `contain`).
 - Prompt, erro, progresso e documentação em pt-BR.
 
 ## Formato
 
 - RGB565: `(R >> 3) << 11 | (G >> 2) << 5 | (B >> 3)`, little-endian. O arquivo não aplica o invert do painel.
-- `frame_us = (1000000 + fps / 2) / fps`. fps inteiro de 1 a 60. `gop = max(1, (1000000 + frame_us / 2) / frame_us)`.
-- Um palette por GOP. Frame 0 e todo índice múltiplo de `gop` é keyframe: bits 0 e 1, 30 bandas, `band_mask = 0x3FFFFFFF`, paleta de 256 entradas. Delta não traz paleta. Banda omitida é igual à do quadro anterior. Delta vazio é válido.
-- A paleta sai de um histograma RGB565 quantizado em OKLab (median cut por erro, k-means, semente do GOP anterior). `--dither` é `none`, `ordered` ou `fs`. Sozinho, vale `fs`. O padrão é `none`.
+- `frame_us = (1000000 + fps / 2) / fps`. fps inteiro de 1 a 80. `gop = max(1, (1000000 + frame_us / 2) / frame_us)`.
+- Um palette por GOP, ordenada por luminância OKLab. `contain` deixa o preto no slot 0. Frame 0 e todo índice múltiplo de `gop` é keyframe: bits 0 e 1, 240 linhas, máscara toda ligada. Delta não traz paleta. Linha omitida é igual à do quadro anterior. Delta vazio é válido.
+- Hold: o índice anterior fica quando o erro OKLab da cor antiga cabe na margem do melhor. A margem inicial é um passo de verde no RGB565. A escada, se o pior segundo passa de 16 Mbit/s, sobe o hold (1, 4, 16) e depois corta cores (128, 64, 32). Floyd–Steinberg só entra no hold a partir da segunda passagem. Cada passagem relê o ffmpeg.
+- `--dither` é `none`, `ordered` ou `fs`. Sozinho, vale `fs`. O padrão é `none`.
 - `contain` reserva `palette[0] = 0` (barras pretas). `cover` recorta o centro para 1:1.
-- PCM mono s16le a 16000, 24000 ou 48000 Hz (padrão 48000), no bloco depois do último quadro. `audio_offset` 0 é arquivo sem áudio. `--sample-rate` e `--no-audio`. Amostra 0 no quadro 0. `sample_count = (frame_count * frame_us * sample_rate + 500000) / 1000000`. Origem curta ganha silêncio; origem longa é cortada.
-- Por banda, RLE e um bloco LZ4 (sem frame header). Descartar `comp_bytes >= 1920`. O menor ganha. Empate fica RLE. Senão, raw de 1920. Pad de zeros até múltiplo de 4.
-- CRC32 PNG/zlib (poly `0xEDB88320`, init e xor-out `0xFFFFFFFF`) cobre o body antes do campo, e o PCM à parte. `body_bytes` máximo 58244.
-- O CLI não escreve datagramas. Vídeo e áudio saem em sockets diferentes; o cabeçalho de cada um tem 16 bytes. A taxa é `frags = ceil(payload / 1456)`, `udp_bytes = payload + 16 * frags`, somando o PCM no mesmo segundo. Sucesso padrão: pior segundo ≤ 16 Mbit/s. Acima disso o arquivo continua gravado e o processo sai com código 2, salvo `--allow-over-budget`.
+- Áudio no arquivo é IMA ADPCM mono (`sample_format` 1) a 16000, 24000 ou 48000 Hz (padrão 48000). O ffmpeg entrega s16le. `audio_offset` 0 é arquivo sem áudio. `--sample-rate` e `--no-audio`. Amostra 0 no quadro 0. `sample_count = (frame_count * frame_us * sample_rate + 500000) / 1000000`. Origem curta ganha silêncio; origem longa é cortada.
+- Por linha suja, RLE absoluto, delta à esquerda no keyframe e resíduo com `dx` de −16 a 16 no delta. Descartar `comp_bytes >= 240`. O menor ganha. Empate fica com o codec tentado antes. Senão, raw de 240. Pad de zeros até múltiplo de 4. Sem LZ4.
+- CRC32 PNG/zlib (poly `0xEDB88320`, init e xor-out `0xFFFFFFFF`) cobre o body antes do campo, e o ADPCM à parte. `body_bytes` máximo 59110.
+- O CLI não escreve datagramas. Vídeo e áudio saem em sockets diferentes; o cabeçalho de cada um tem 16 bytes. A taxa conta o PCM s16 expandido, não o ADPCM do arquivo: `frags = ceil(payload / 1456)`, `udp_bytes = payload + 16 * frags`. Sucesso padrão: pior segundo ≤ 16 Mbit/s. No chão da escada o arquivo continua gravado e o processo sai com código 2, salvo `--allow-over-budget`.
 
 ## ffmpeg
 

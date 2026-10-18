@@ -134,7 +134,7 @@ Iguais ao arquivo. Vídeo: `seq`, `frame_index`, `frag_index`, `frag_count`, `pa
 
 O host não dorme entre fragmentos do mesmo `frame`. Só segura quando o crédito não cabe o próximo payload. Um body novo só começa se `free_bytes` cobre `frag_count * 1456`, que é o que o device reserva ao abrir o slot. Sem isso o ring cheio descarta o quadro e os deltas até o próximo keyframe. Em cada volta o PCM sai antes do vídeo. No máximo 20 datagramas de vídeo de 1456 bytes ficam no ar ao mesmo tempo: o `SO_RCVBUF` do socket de vídeo no device é 32 KiB, e uma rajada maior perde UDP.
 
-O PCM anda pelo playhead, não pelo ring. O device ignora `time_us` e enfileira na ordem. Cada volta manda no máximo 8 datagramas de áudio, para a rajada caber no `SO_RCVBUF` de 32 KiB. O índice da amostra é absoluto e o byte lido é `amostra % amostras_do_arquivo`.
+O PCM anda pelo playhead, não pelo ring. O arquivo guarda IMA ADPCM. O host expande o bloco da amostra para s16le antes do socket de áudio; o datagrama não leva nibble. O device ignora `time_us` e enfileira na ordem. Cada volta manda no máximo 8 datagramas de áudio, para a rajada caber no `SO_RCVBUF` de 32 KiB. O índice da amostra é absoluto e a amostra lida é `amostra % amostras_do_arquivo`.
 
 ```text
 alvo_us = play_frame * frame_us + 350000

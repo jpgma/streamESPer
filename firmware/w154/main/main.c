@@ -38,7 +38,7 @@ static void flags_and(uint32_t mask)
 
 void player_on_reset(uint32_t token, uint32_t frame_us)
 {
-    if (frame_us < 16667 || frame_us > 1000000) {
+    if (frame_us < 12500 || frame_us > 1000000) {
         frame_us = 41667;
     }
     atomic_store(&g.token, token);

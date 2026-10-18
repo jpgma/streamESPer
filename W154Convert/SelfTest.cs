@@ -7,8 +7,23 @@ static class SelfTest
         Check(Crc32.Compute("123456789"u8) == 0xCBF43926, "crc32 de 123456789");
         Check(PictureContract.FrameUs(24) == 41667 && PictureContract.Gop(41667) == 24, "frame_us e gop de 24 fps");
         Check(PictureContract.FrameUs(30) == 33333 && PictureContract.Gop(33333) == 30, "frame_us e gop de 30 fps");
+        Check(PictureContract.FrameUs(80) == 12500 && PictureContract.Gop(12500) == 80, "frame_us e gop de 80 fps");
+        Check(PictureContract.FrameUsOk(12500) && !PictureContract.FrameUsOk(12499), "frame_us 12499 é recusado");
+        bool fpsRejected = false;
+        try
+        {
+            PictureContract.FrameUs(81);
+        }
+        catch (W154Exception)
+        {
+            fpsRejected = true;
+        }
+
+        Check(fpsRejected, "fps 81 é recusado");
         CheckRle();
-        CheckLz4();
+        CheckRows();
+        CheckHold();
+        CheckIma();
         CheckRate();
         CheckFit();
         CheckPalette();
@@ -21,77 +36,84 @@ static class SelfTest
 
     static void CheckRle()
     {
-        var band = new byte[PictureContract.BandBytes];
+        var band = new byte[PictureContract.RowBytes];
         Array.Fill(band, (byte)7);
         byte[] encoded = BandRle.Encode(band);
-        Check(encoded.Length == 30, "RLE de faixa constante tem 30 bytes");
-        for (int i = 0; i < 15; i++)
-        {
-            Check(encoded[i * 2] == 0xFF && encoded[(i * 2) + 1] == 0x07, "par RLE FF 07");
-        }
+        Check(encoded.Length == 4 && encoded[0] == 0xFF && encoded[1] == 0x07 && encoded[2] == 0xEF && encoded[3] == 0x07, "RLE de linha constante");
 
-        var decoded = new byte[PictureContract.BandBytes];
+        var decoded = new byte[PictureContract.RowBytes];
         Check(BandRle.TryDecode(encoded, decoded) && decoded.AsSpan().SequenceEqual(band), "roundtrip RLE constante");
 
-        var mixed = new byte[PictureContract.BandBytes];
+        var mixed = new byte[PictureContract.RowBytes];
         for (int i = 0; i < mixed.Length; i++)
             mixed[i] = (byte)(i < 100 ? 3 : i);
         byte[] mixedEncoded = BandRle.Encode(mixed);
         Check(BandRle.TryDecode(mixedEncoded, decoded) && decoded.AsSpan().SequenceEqual(mixed), "roundtrip RLE misto");
     }
 
-    static void CheckLz4()
+    static void CheckRows()
     {
-        var flat = new byte[PictureContract.BandBytes];
-        Array.Fill(flat, (byte)7);
-        byte[]? compressed = Lz4Block.TryCompress(flat, PictureContract.BandBytes - 1);
-        Check(compressed is not null, "LZ4 comprime faixa plana");
-        var decoded = new byte[PictureContract.BandBytes];
-        Check(compressed is not null && Lz4Block.TryDecode(compressed, decoded) && decoded.AsSpan().SequenceEqual(flat), "roundtrip LZ4 plano");
-
-        var noise = new byte[PictureContract.BandBytes];
-        uint state = 0x12345678;
-        for (int i = 0; i < noise.Length; i++)
+        var prior = new byte[PictureContract.Pixels];
+        var shifted = new byte[PictureContract.Pixels];
+        for (int y = 0; y < PictureContract.Height; y++)
         {
-            state = (state * 1664525) + 1013904223;
-            noise[i] = (byte)(state >> 24);
-        }
-
-        byte[]? noiseCompressed = Lz4Block.TryCompress(noise, PictureContract.BandBytes - 1);
-        if (noiseCompressed is not null)
-            Check(Lz4Block.TryDecode(noiseCompressed, decoded) && decoded.AsSpan().SequenceEqual(noise), "roundtrip LZ4 de ruído");
-
-        bool rejected = false;
-        for (int seed = 1; seed <= 32; seed++)
-        {
-            FillIncompressible(noise, (uint)seed);
-            if (Lz4Block.TryCompress(noise, PictureContract.BandBytes - 1) is null)
+            for (int x = 0; x < PictureContract.Width; x++)
             {
-                rejected = true;
-                break;
+                prior[(y * PictureContract.Width) + x] = (byte)((x * 3) + y);
+                int src = x - 4;
+                if (src < 0)
+                    src = 0;
+                shifted[(y * PictureContract.Width) + x] = prior[(y * PictureContract.Width) + src];
             }
-
-            byte[]? again = Lz4Block.TryCompress(noise, PictureContract.BandBytes - 1);
-            Check(again is not null && Lz4Block.TryDecode(again, decoded) && decoded.AsSpan().SequenceEqual(noise), "roundtrip LZ4");
         }
 
-        Check(rejected, "LZ4 recusa bloco que não comprime");
+        var palette = new ushort[PictureContract.PaletteColors];
+        byte[] delta = FrameEncoder.Build(false, palette, shifted, prior);
+        Check(delta.Length < 8000, "linha deslocada comprime o residual");
+        int row = PictureContract.PreambleBytes;
+        Check(delta[row] == RowCodec.Residual, "delta de deslocamento usa o codec residual");
     }
 
-    static void FillIncompressible(byte[] data, uint seed)
+    static void CheckHold()
     {
-        uint state = seed * 747796405u + 2891336453u;
-        for (int i = 0; i < data.Length; i++)
+        ushort[] gray = Solid(Rgb565.Pack(128, 128, 128));
+        ushort[] near = Solid(Rgb565.Pack(128, 132, 128));
+        ushort[] far = Solid(Rgb565.Pack(255, 0, 0));
+        string path = Path.Combine(Path.GetTempPath(), "w154-hold-" + Guid.NewGuid().ToString("N") + ".w154");
+        try
         {
-            state = (state * 747796405u) + 2891336453u;
-            data[i] = (byte)(state >> 24);
+            int[] held = Converter.EncodeFrames([gray, near], 2, contain: false, DitherMode.None, path);
+            Check(held[1] == PictureContract.MinBodyBytes, "hold segura um passo de RGB565");
+            int[] released = Converter.EncodeFrames([gray, far], 2, contain: false, DitherMode.None, path);
+            Check(released[1] > PictureContract.MinBodyBytes, "hold solta uma cor distante");
         }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    static void CheckIma()
+    {
+        int samples = 1200;
+        var silence = new byte[samples * 2];
+        byte[] encoded = ImaAdpcm.Encode(silence);
+        Check(encoded.Length == ImaAdpcm.PayloadBytes(samples) && ImaAdpcm.Accepts(encoded, samples), "ADPCM de silêncio cabe nos blocos");
+        Check(ImaAdpcm.DecodeAll(encoded, samples).AsSpan().SequenceEqual(silence), "ADPCM de silêncio volta a zero");
+    }
+
+    static ushort[] Solid(ushort color)
+    {
+        var frame = new ushort[PictureContract.Pixels];
+        Array.Fill(frame, color);
+        return frame;
     }
 
     static void CheckRate()
     {
-        Check(RateCheck.Fragments(58244) == 41 && RateCheck.UdpBytes(58244) == 58900, "keyframe raw 58244");
-        Check(RateCheck.Fragments(57732) == 40 && RateCheck.UdpBytes(57732) == 58372, "delta raw 57732");
+        Check(RateCheck.Fragments(PictureContract.MaxBodyBytes) == 41 && RateCheck.UdpBytes(PictureContract.MaxBodyBytes) == 59766, "keyframe raw 59110");
+        Check(RateCheck.UdpBytes(PictureContract.MinBodyBytes) == PictureContract.MinBodyBytes + PictureContract.FragHeader, "delta vazio em um datagrama");
     }
 
     static void CheckFit()
@@ -234,7 +256,7 @@ static class SelfTest
     static ushort[] ReadPalette(byte[] file, int frame)
     {
         int at = PictureContract.HeaderSize + (frame * 4);
-        int palette = (int)ReadU32(file, at) + 4 + 8;
+            int palette = (int)ReadU32(file, at) + 4 + PictureContract.PreambleBytes;
         var entries = new ushort[PictureContract.PaletteColors];
         for (int i = 0; i < entries.Length; i++)
             entries[i] = (ushort)(file[palette + (i * 2)] | (file[palette + (i * 2) + 1] << 8));
@@ -269,7 +291,8 @@ static class SelfTest
 
         ushort[] first = Solid(red);
         ushort[] dirty = (ushort[])first.Clone();
-        for (int i = 3 * PictureContract.BandBytes; i < 4 * PictureContract.BandBytes; i++)
+        int row = 40 * PictureContract.Width;
+        for (int i = row; i < row + PictureContract.Width; i++)
             dirty[i] = green;
         ushort[] third = Solid(blue);
         ushort[] still = (ushort[])third.Clone();
@@ -302,7 +325,7 @@ static class SelfTest
             string contained = path + ".contain.w154";
             Converter.EncodeFrames([first], 24, contain: true, DitherMode.None, contained);
             byte[] containBytes = File.ReadAllBytes(contained);
-            int palette = 32 + 4 + 4 + 8;
+            int palette = PictureContract.HeaderSize + 4 + 4 + PictureContract.PreambleBytes;
             ushort entry0 = (ushort)(containBytes[palette] | (containBytes[palette + 1] << 8));
             Check(entry0 == 0, "contain grava palette[0] = 0");
             File.Delete(contained);
@@ -320,8 +343,8 @@ static class SelfTest
         Check(AudioPcm.SampleCount(24, 41667, 16000) == 16000, "24 quadros a 16000 Hz");
         Check(RateCheck.Fragments(96000) == 66 && RateCheck.UdpBytes(96000) == 97056, "um segundo de 48000 Hz mono");
 
-        int videoUdp = RateCheck.UdpBytes(58244);
-        RateReport mixed = RateCheck.Measure(1_000_000, new[] { 58244 }, 48000, 48000);
+        int videoUdp = RateCheck.UdpBytes(PictureContract.MaxBodyBytes);
+        RateReport mixed = RateCheck.Measure(1_000_000, new[] { PictureContract.MaxBodyBytes }, 48000, 48000);
         double expected = (videoUdp + 97056) * 8.0 / 1_000_000.0;
         Check(mixed.WorstSecond == 0 && mixed.WorstMbps == expected && mixed.AverageMbps == expected, "áudio soma no balde do vídeo");
 
@@ -329,9 +352,6 @@ static class SelfTest
         Array.Fill(frame, Rgb565.Pack(255, 0, 0));
         int samples = AudioPcm.SampleCount(1, PictureContract.FrameUs(24), 48000);
         var pcm = new byte[samples * 2];
-        for (int i = 0; i < pcm.Length; i++)
-            pcm[i] = (byte)i;
-
         string path = Path.Combine(Path.GetTempPath(), "w154-audio-" + Guid.NewGuid().ToString("N") + ".w154");
         try
         {
@@ -340,37 +360,42 @@ static class SelfTest
 
             byte[] file = File.ReadAllBytes(path);
             uint audioOffset = ReadU32(file, 28);
-            Check(audioOffset + AudioPcm.HeaderBytes + (uint)pcm.Length == (uint)file.Length, "audio_offset no fim do vídeo");
-            Check(file.AsSpan((int)audioOffset + AudioPcm.HeaderBytes).SequenceEqual(pcm), "PCM roundtrip");
-            Check(ReadU32(file, (int)audioOffset + 12) == Crc32.Compute(pcm), "crc32 do PCM");
+            uint storedBytes = ReadU32(file, (int)audioOffset);
+            int payloadAt = (int)audioOffset + AudioPcm.HeaderBytes;
+            Check(audioOffset + AudioPcm.HeaderBytes + storedBytes == (uint)file.Length, "audio_offset no fim do vídeo");
+            Check(storedBytes == (uint)ImaAdpcm.PayloadBytes(samples), "pcm_bytes é o ADPCM da duração");
+            Check(ReadU16(file, (int)audioOffset + 10) == AudioPcm.FormatIma, "sample_format 1");
+            ReadOnlySpan<byte> payload = file.AsSpan(payloadAt, (int)storedBytes);
+            Check(ImaAdpcm.DecodeAll(payload, samples).AsSpan().SequenceEqual(pcm), "ADPCM de silêncio no arquivo");
+            Check(ReadU32(file, (int)audioOffset + 12) == Crc32.Compute(payload), "crc32 do ADPCM");
 
             string padded = path + ".pad.w154";
-            var head = new byte[4];
-            pcm.AsSpan(0, 4).CopyTo(head);
+            var head = new byte[] { 0x34, 0x12, 0x00, 0x00 };
             using (var shortPcm = new MemoryStream(head))
                 Converter.EncodeFrames([frame], 24, contain: false, DitherMode.None, padded, shortPcm, 48000);
             byte[] padFile = File.ReadAllBytes(padded);
             int padAt = (int)ReadU32(padFile, 28) + AudioPcm.HeaderBytes;
-            Check(padFile.AsSpan(padAt, 4).SequenceEqual(head), "PCM curto preserva o início");
-            Check(padFile[padAt + 4] == 0, "PCM curto completa com silêncio");
+            int padBytes = (int)ReadU32(padFile, (int)ReadU32(padFile, 28));
+            byte[] padDecoded = ImaAdpcm.DecodeAll(padFile.AsSpan(padAt, padBytes), samples);
+            Check(padDecoded[0] == 0x34 && padDecoded[1] == 0x12, "ADPCM curto preserva a primeira amostra");
             File.Delete(padded);
 
             string trimmed = path + ".trim.w154";
             var longPcm = new byte[pcm.Length + 4];
-            pcm.CopyTo(longPcm, 0);
             longPcm[^1] = 0xFF;
             using (var longStream = new MemoryStream(longPcm))
                 Converter.EncodeFrames([frame], 24, contain: false, DitherMode.None, trimmed, longStream, 48000);
             byte[] trimFile = File.ReadAllBytes(trimmed);
-            Check(trimFile.Length == file.Length && trimFile[^1] == pcm[^1], "PCM longo é cortado");
+            Check(trimFile.Length == file.Length, "PCM longo é cortado antes do ADPCM");
             File.Delete(trimmed);
 
             ExpectReject(WithU32(file, (int)audioOffset + 4, 22050), "sample_rate 22050 é recusado");
             ExpectReject(WithU16(file, (int)audioOffset + 8, 2), "channels 2 é recusado");
+            ExpectReject(WithU16(file, (int)audioOffset + 10, AudioPcm.FormatS16Le), "sample_format 0 é recusado");
             ExpectReject(WithU32(file, (int)audioOffset, 1), "pcm_bytes ímpar é recusado");
             byte[] badCrc = (byte[])file.Clone();
-            badCrc[(int)audioOffset + AudioPcm.HeaderBytes] ^= 0xFF;
-            ExpectReject(badCrc, "crc32 do PCM alterado é recusado");
+            badCrc[payloadAt] ^= 0xFF;
+            ExpectReject(badCrc, "crc32 do ADPCM alterado é recusado");
             ExpectReject(WithU32(file, 28, audioOffset + 4), "folga antes do PCM é recusada");
         }
         finally
@@ -379,6 +404,8 @@ static class SelfTest
                 File.Delete(path);
         }
     }
+
+    static ushort ReadU16(byte[] data, int offset) => (ushort)(data[offset] | (data[offset + 1] << 8));
 
     static uint ReadU32(byte[] data, int offset) =>
         (uint)(data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24));

@@ -14,35 +14,36 @@ public static class FrameEncoder
         {
             if (palette.Length < PictureContract.PaletteColors)
                 throw new W154Exception("palette com menos de 256 entradas.");
-            WriteU16(body, PictureContract.BandCount);
-            WriteU32(body, PictureContract.KeyframeMask);
+            WriteU16(body, PictureContract.RowCount);
+            for (int i = 0; i < PictureContract.RowMaskBytes; i++)
+                body.Add(0xFF);
             for (int i = 0; i < PictureContract.PaletteColors; i++)
                 WriteU16(body, palette[i]);
-            for (int band = 0; band < PictureContract.BandCount; band++)
+            for (int row = 0; row < PictureContract.RowCount; row++)
             {
-                int off = band * PictureContract.BandBytes;
-                BandCodec.Append(body, indices.Slice(off, PictureContract.BandBytes));
+                int off = row * PictureContract.RowBytes;
+                RowCodec.Append(body, indices.Slice(off, PictureContract.RowBytes), ReadOnlySpan<byte>.Empty, keyframe: true);
             }
         }
         else
         {
-            uint mask = 0;
             ushort count = 0;
+            var mask = new byte[PictureContract.RowMaskBytes];
             var records = new List<byte>();
-            for (int band = 0; band < PictureContract.BandCount; band++)
+            for (int row = 0; row < PictureContract.RowCount; row++)
             {
-                int off = band * PictureContract.BandBytes;
-                ReadOnlySpan<byte> current = indices.Slice(off, PictureContract.BandBytes);
-                ReadOnlySpan<byte> prior = previous.Slice(off, PictureContract.BandBytes);
+                int off = row * PictureContract.RowBytes;
+                ReadOnlySpan<byte> current = indices.Slice(off, PictureContract.RowBytes);
+                ReadOnlySpan<byte> prior = previous.Slice(off, PictureContract.RowBytes);
                 if (current.SequenceEqual(prior))
                     continue;
-                mask |= 1u << band;
+                mask[row >> 3] |= (byte)(1 << (row & 7));
                 count++;
-                BandCodec.Append(records, current);
+                RowCodec.Append(records, current, prior, keyframe: false);
             }
 
             WriteU16(body, count);
-            WriteU32(body, mask);
+            body.AddRange(mask);
             body.AddRange(records);
         }
 
@@ -122,8 +123,8 @@ public static class W154File
     {
         if (lengths.Length < 1)
             throw new W154Exception("o vídeo não tem quadros.");
-        if (frameUs is < 16667 or > 1_000_000)
-            throw new W154Exception("frame_us fora de 16667..1000000.");
+        if (!PictureContract.FrameUsOk(frameUs))
+            throw new W154Exception("frame_us fora de 12500..1000000.");
 
         long videoEnd = PictureContract.HeaderSize + (lengths.Length * 4L);
         foreach (int length in lengths)
@@ -134,13 +135,18 @@ public static class W154File
         }
 
         uint audioOffset = 0;
-        int pcmBytes = 0;
+        byte[]? adpcm = null;
         uint pcmCrc = 0;
         if (pcm is not null)
         {
             AudioPcm.RequireRate(sampleRate);
-            pcmBytes = AudioPcm.SampleCount(lengths.Length, frameUs, sampleRate) * 2;
-            pcmCrc = AudioPcm.CrcFitted(pcm, pcmBytes);
+            int sampleCount = AudioPcm.SampleCount(lengths.Length, frameUs, sampleRate);
+            var fitted = new byte[sampleCount * 2];
+            if (pcm.CanSeek)
+                pcm.Position = 0;
+            AudioPcm.ReadFitted(pcm, fitted);
+            adpcm = ImaAdpcm.Encode(fitted);
+            pcmCrc = Crc32.Compute(adpcm);
             audioOffset = (uint)videoEnd;
         }
 
@@ -163,7 +169,7 @@ public static class W154File
                 BinaryPrimitives.WriteUInt16LittleEndian(header[8..], PictureContract.Width);
                 BinaryPrimitives.WriteUInt16LittleEndian(header[10..], PictureContract.Height);
                 BinaryPrimitives.WriteUInt16LittleEndian(header[12..], PictureContract.BandRows);
-                BinaryPrimitives.WriteUInt16LittleEndian(header[14..], PictureContract.BandCount);
+                BinaryPrimitives.WriteUInt16LittleEndian(header[14..], PictureContract.BandCountMax);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[16..], (uint)frameUs);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[20..], (uint)lengths.Length);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[28..], audioOffset);
@@ -181,17 +187,16 @@ public static class W154File
                 prefixed.Position = 0;
                 prefixed.CopyTo(output);
 
-                if (pcm is not null)
+                if (adpcm is not null)
                 {
                     Span<byte> audio = stackalloc byte[AudioPcm.HeaderBytes];
-                    BinaryPrimitives.WriteUInt32LittleEndian(audio, (uint)pcmBytes);
+                    BinaryPrimitives.WriteUInt32LittleEndian(audio, (uint)adpcm.Length);
                     BinaryPrimitives.WriteUInt32LittleEndian(audio[4..], (uint)sampleRate);
                     BinaryPrimitives.WriteUInt16LittleEndian(audio[8..], AudioPcm.Channels);
-                    BinaryPrimitives.WriteUInt16LittleEndian(audio[10..], AudioPcm.FormatS16Le);
+                    BinaryPrimitives.WriteUInt16LittleEndian(audio[10..], AudioPcm.FormatIma);
                     BinaryPrimitives.WriteUInt32LittleEndian(audio[12..], pcmCrc);
                     output.Write(audio);
-                    pcm.Position = 0;
-                    AudioPcm.CopyFitted(pcm, output, pcmBytes);
+                    output.Write(adpcm);
                 }
             }
 
@@ -213,14 +218,14 @@ public static class W154File
         if (header[0] != (byte)'W' || header[1] != (byte)'1' || header[2] != (byte)'5' || header[3] != (byte)'4')
             throw new W154Exception("magic diferente de W154.");
         if (BinaryPrimitives.ReadUInt16LittleEndian(header[4..]) != PictureContract.Version)
-            throw new W154Exception("version diferente de 1.");
+            throw new W154Exception("version diferente de 2.");
         if (BinaryPrimitives.ReadUInt16LittleEndian(header[6..]) != PictureContract.HeaderSize)
             throw new W154Exception("header_size diferente de 32.");
         if (BinaryPrimitives.ReadUInt16LittleEndian(header[8..]) != PictureContract.Width
             || BinaryPrimitives.ReadUInt16LittleEndian(header[10..]) != PictureContract.Height)
             throw new W154Exception("width ou height diferente de 240.");
         if (BinaryPrimitives.ReadUInt16LittleEndian(header[12..]) != PictureContract.BandRows
-            || BinaryPrimitives.ReadUInt16LittleEndian(header[14..]) != PictureContract.BandCount)
+            || BinaryPrimitives.ReadUInt16LittleEndian(header[14..]) != PictureContract.BandCountMax)
             throw new W154Exception("band_rows ou band_count_max diferente do contrato.");
 
         uint frameUs = BinaryPrimitives.ReadUInt32LittleEndian(header[16..]);
@@ -230,8 +235,8 @@ public static class W154File
             throw new W154Exception("flags do header não são 0.");
         if (frameCount < 1)
             throw new W154Exception("frame_count menor que 1.");
-        if (frameUs is < 16667 or > 1_000_000)
-            throw new W154Exception("frame_us fora de 16667..1000000.");
+        if (!PictureContract.FrameUsOk((int)frameUs))
+            throw new W154Exception("frame_us fora de 12500..1000000.");
 
         int gop = PictureContract.Gop((int)frameUs);
         var offsets = new uint[frameCount];
@@ -291,69 +296,56 @@ public static class W154File
         ushort channels = BinaryPrimitives.ReadUInt16LittleEndian(audio[8..]);
         ushort format = BinaryPrimitives.ReadUInt16LittleEndian(audio[10..]);
         uint stored = BinaryPrimitives.ReadUInt32LittleEndian(audio[12..]);
-        if (pcmBytes == 0 || (pcmBytes & 1) != 0)
+        if (pcmBytes == 0 || (pcmBytes & 3) != 0)
             throw new W154Exception("pcm_bytes inválido.");
         if (!AudioPcm.IsRate((int)sampleRate))
             throw new W154Exception("sample_rate fora de 16000, 24000 e 48000.");
         if (channels != AudioPcm.Channels)
             throw new W154Exception("channels diferente de 1.");
-        if (format != AudioPcm.FormatS16Le)
-            throw new W154Exception("sample_format diferente de 0.");
+        if (format != AudioPcm.FormatIma)
+            throw new W154Exception("sample_format diferente de 1.");
 
-        int expected = AudioPcm.SampleCount(frameCount, frameUs, (int)sampleRate) * 2;
-        if (pcmBytes != (uint)expected)
+        int sampleCount = AudioPcm.SampleCount(frameCount, frameUs, (int)sampleRate);
+        if (pcmBytes != (uint)ImaAdpcm.PayloadBytes(sampleCount))
             throw new W154Exception("pcm_bytes não cobre a duração do vídeo.");
         if ((long)pcmBytes > stream.Length - stream.Position)
             throw new W154Exception("arquivo acabou antes do PCM.");
 
-        uint actual = CrcFitted(stream, pcmBytes);
+        var payload = new byte[pcmBytes];
+        ReadExact(stream, payload);
+        if (!ImaAdpcm.Accepts(payload, sampleCount))
+            throw new W154Exception("bloco ADPCM inválido.");
+        uint actual = Crc32.Compute(payload);
         if (stored != actual)
             throw new W154Exception("crc32 do PCM diferente.");
         if (stream.Position != stream.Length)
             throw new W154Exception("bytes sobrando depois do PCM.");
     }
 
-    static uint CrcFitted(Stream stream, uint length)
-    {
-        uint crc = 0xFFFFFFFF;
-        var buffer = new byte[65536];
-        long left = length;
-        while (left > 0)
-        {
-            int want = (int)Math.Min(buffer.Length, left);
-            int got = stream.Read(buffer, 0, want);
-            if (got == 0)
-                throw new W154Exception("arquivo acabou antes do esperado.");
-            crc = Crc32.Update(crc, buffer.AsSpan(0, got));
-            left -= got;
-        }
-
-        return Crc32.Finish(crc);
-    }
-
     static byte[] DecodeFrame(int index, int gop, byte[] body, byte[]? previous)
     {
+        if (body.Length < PictureContract.PreambleBytes + 4)
+            throw new W154Exception($"quadro {index} menor que o preâmbulo.");
         int pos = 0;
         ushort flags = ReadU16(body, ref pos);
-        ushort bandCount = ReadU16(body, ref pos);
-        uint mask = ReadU32(body, ref pos);
+        ushort rowCount = ReadU16(body, ref pos);
+        var mask = body.AsSpan(pos, PictureContract.RowMaskBytes);
+        pos += PictureContract.RowMaskBytes;
         if ((flags & ~0x3) != 0)
             throw new W154Exception($"quadro {index} tem flag além dos bits 0 e 1.");
-        if ((mask & 0xC0000000u) != 0)
-            throw new W154Exception($"quadro {index} tem bit 30 ou 31 em band_mask.");
-        if (PopCount(mask) != bandCount)
-            throw new W154Exception($"quadro {index} tem band_count diferente do band_mask.");
+        if (PopCount(mask) != rowCount)
+            throw new W154Exception($"quadro {index} tem row_count diferente da row_mask.");
 
         bool keyframe = index % gop == 0;
         if (keyframe)
         {
-            if (flags != 3 || bandCount != PictureContract.BandCount || mask != PictureContract.KeyframeMask)
+            if (flags != 3 || rowCount != PictureContract.RowCount || !MaskFull(mask))
                 throw new W154Exception($"quadro {index} deveria ser keyframe completo.");
             if (pos + PictureContract.PaletteBytes > body.Length)
                 throw new W154Exception($"quadro {index} sem paleta.");
             pos += PictureContract.PaletteBytes;
         }
-        else if ((flags & 0x1) != 0 || (flags & 0x2) != 0)
+        else if (flags != 0)
         {
             throw new W154Exception($"quadro {index} é delta com paleta ou bit de keyframe.");
         }
@@ -365,24 +357,27 @@ public static class W154File
         var decoded = keyframe ? new byte[PictureContract.Pixels] : (byte[])previous!.Clone();
         var prior = previous;
         int seen = 0;
-        for (int band = 0; band < PictureContract.BandCount; band++)
+        for (int row = 0; row < PictureContract.RowCount; row++)
         {
-            if ((mask & (1u << band)) == 0)
+            if ((mask[row >> 3] & (1 << (row & 7))) == 0)
                 continue;
             if (pos + 4 > body.Length - 4)
-                throw new W154Exception($"quadro {index} acabou no meio de uma banda.");
+                throw new W154Exception($"quadro {index} acabou no meio de uma linha.");
             byte codec = body[pos++];
-            if (body[pos++] != 0)
-                throw new W154Exception($"quadro {index} banda {band} com byte zero diferente de 0.");
+            sbyte dx = (sbyte)body[pos++];
             ushort comp = ReadU16(body, ref pos);
-            if (codec == BandCodec.Raw && comp != PictureContract.BandBytes)
-                throw new W154Exception($"quadro {index} banda {band} raw sem 1920 bytes.");
-            if (codec is BandCodec.Rle or BandCodec.Lz4 && (comp == 0 || comp >= PictureContract.BandBytes))
-                throw new W154Exception($"quadro {index} banda {band} comprimida não é menor que 1920.");
-            if (codec > BandCodec.Lz4)
-                throw new W154Exception($"quadro {index} banda {band} com codec desconhecido.");
+            if (codec > RowCodec.Left)
+                throw new W154Exception($"quadro {index} linha {row} com codec desconhecido.");
+            if (keyframe && codec == RowCodec.Residual)
+                throw new W154Exception($"quadro {index} linha {row} residual num keyframe.");
+            if (!keyframe && codec == RowCodec.Left)
+                throw new W154Exception($"quadro {index} linha {row} delta à esquerda num delta.");
+            if (codec == RowCodec.Raw && (comp != PictureContract.RowBytes || dx != 0))
+                throw new W154Exception($"quadro {index} linha {row} raw sem 240 bytes.");
+            if (codec != RowCodec.Raw && (comp == 0 || comp >= PictureContract.RowBytes))
+                throw new W154Exception($"quadro {index} linha {row} comprimida não é menor que 240.");
             if (pos + comp > body.Length - 4)
-                throw new W154Exception($"quadro {index} banda {band} passa do body.");
+                throw new W154Exception($"quadro {index} linha {row} passa do body.");
 
             var data = body.AsSpan(pos, comp);
             pos += comp;
@@ -390,23 +385,19 @@ public static class W154File
             for (int p = 0; p < pad; p++)
             {
                 if (pos >= body.Length - 4 || body[pos++] != 0)
-                    throw new W154Exception($"quadro {index} banda {band} com pad diferente de zero.");
+                    throw new W154Exception($"quadro {index} linha {row} com pad diferente de zero.");
             }
 
-            var target = decoded.AsSpan(band * PictureContract.BandBytes, PictureContract.BandBytes);
-            bool ok = codec switch
-            {
-                BandCodec.Raw => CopyRaw(data, target),
-                BandCodec.Rle => BandRle.TryDecode(data, target),
-                _ => Lz4Block.TryDecode(data, target),
-            };
-            if (!ok)
-                throw new W154Exception($"quadro {index} banda {band} não decodifica para 1920 bytes.");
+            int off = row * PictureContract.RowBytes;
+            var target = decoded.AsSpan(off, PictureContract.RowBytes);
+            ReadOnlySpan<byte> pred = prior is null ? ReadOnlySpan<byte>.Empty : prior.AsSpan(off, PictureContract.RowBytes);
+            if (!RowCodec.TryApply(codec, dx, data, target, pred))
+                throw new W154Exception($"quadro {index} linha {row} não decodifica para 240 bytes.");
             seen++;
         }
 
-        if (seen != bandCount)
-            throw new W154Exception($"quadro {index} não tem os records do band_mask.");
+        if (seen != rowCount)
+            throw new W154Exception($"quadro {index} não tem os records da row_mask.");
         if (pos != body.Length - 4)
             throw new W154Exception($"quadro {index} tem lixo antes do crc32.");
 
@@ -417,35 +408,42 @@ public static class W154File
 
         if (!keyframe)
         {
-            for (int band = 0; band < PictureContract.BandCount; band++)
+            for (int row = 0; row < PictureContract.RowCount; row++)
             {
-                int off = band * PictureContract.BandBytes;
-                bool differs = !decoded.AsSpan(off, PictureContract.BandBytes)
-                    .SequenceEqual(prior!.AsSpan(off, PictureContract.BandBytes));
-                bool listed = (mask & (1u << band)) != 0;
+                int off = row * PictureContract.RowBytes;
+                bool differs = !decoded.AsSpan(off, PictureContract.RowBytes)
+                    .SequenceEqual(prior!.AsSpan(off, PictureContract.RowBytes));
+                bool listed = (mask[row >> 3] & (1 << (row & 7))) != 0;
                 if (differs != listed)
-                    throw new W154Exception($"quadro {index} banda {band} não bate com a diferença real.");
+                    throw new W154Exception($"quadro {index} linha {row} não bate com a diferença real.");
             }
         }
 
         return decoded;
     }
 
-    static bool CopyRaw(ReadOnlySpan<byte> data, Span<byte> target)
+    static bool MaskFull(ReadOnlySpan<byte> mask)
     {
-        if (data.Length != target.Length)
-            return false;
-        data.CopyTo(target);
+        for (int i = 0; i < mask.Length; i++)
+        {
+            if (mask[i] != 0xFF)
+                return false;
+        }
+
         return true;
     }
 
-    static int PopCount(uint value)
+    static int PopCount(ReadOnlySpan<byte> mask)
     {
         int count = 0;
-        while (value != 0)
+        for (int i = 0; i < mask.Length; i++)
         {
-            count += (int)(value & 1);
-            value >>= 1;
+            int bits = mask[i];
+            while (bits != 0)
+            {
+                count += bits & 1;
+                bits >>= 1;
+            }
         }
 
         return count;

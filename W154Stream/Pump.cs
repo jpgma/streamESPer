@@ -394,14 +394,14 @@ sealed class Pump : IHostedService
     bool SendAudio(W154Movie movie, IPEndPoint ep, uint playFrame)
     {
         int rate = movie.Audio.SampleRate;
-        int samples = movie.Audio.PcmBytes / 2;
+        int samples = movie.SampleCount;
         if (samples < 1)
             return false;
         long targetUs = (long)playFrame * movie.FrameUs + Session.AudioLeadUs;
         long target = (targetUs * rate) / 1_000_000L;
         bool sent = false;
-        ReadOnlySpan<byte> pcm = movie.Pcm;
         int packets = 0;
+        Span<byte> pcm = stackalloc byte[PictureContract.FragPayload];
         while (_audioSample < target && packets < Session.AudioPacketsPerTurn)
         {
             int at = (int)(_audioSample % samples);
@@ -411,7 +411,8 @@ sealed class Pump : IHostedService
             if (bytes < 2)
                 break;
             ulong timeUs = (ulong)_audioSample * 1_000_000UL / (ulong)rate;
-            WriteAudio(_tx, _audioSeq, (uint)timeUs, pcm.Slice(at * 2, bytes));
+            movie.ReadPcm(at, pcm[..bytes]);
+            WriteAudio(_tx, _audioSeq, (uint)timeUs, pcm[..bytes]);
             if (!Send(_tx, PictureContract.FragHeader + bytes, ep))
                 break;
             _audioSample += bytes / 2;

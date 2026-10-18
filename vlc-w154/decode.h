@@ -9,13 +9,16 @@
 #define W154_WIDTH 240
 #define W154_HEIGHT 240
 #define W154_PIXELS (W154_WIDTH * W154_HEIGHT)
-#define W154_BAND_COUNT 30
-#define W154_BAND_BYTES (W154_WIDTH * 8)
+#define W154_ROW_BYTES 240
+#define W154_ROW_COUNT 240
+#define W154_ROW_MASK 30
+#define W154_PREAMBLE 34
 #define W154_PALETTE_COLORS 256
 #define W154_HEADER_SIZE 32
-#define W154_MIN_BODY 12
-#define W154_MAX_BODY 58244
-#define W154_KEYFRAME_MASK 0x3FFFFFFFu
+#define W154_MIN_BODY 38
+#define W154_MAX_BODY 59110
+#define W154_IMA_SAMPLES 505
+#define W154_IMA_BLOCK 256
 
 typedef struct w154_file_info {
     uint32_t frame_us;
@@ -42,7 +45,11 @@ uint32_t w154_crc32_update(uint32_t crc, const uint8_t *data, size_t len);
 uint32_t w154_crc32_finish(uint32_t crc);
 
 int w154_rle_decode(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_len);
-int w154_lz4_decode(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_len);
+
+uint32_t w154_ima_payload_bytes(uint32_t sample_count);
+uint32_t w154_ima_block_bytes(uint32_t samples);
+int w154_ima_decode_block(const uint8_t *block, uint32_t samples, int16_t *dst);
+int w154_ima_encode(const int16_t *samples, uint32_t sample_count, uint8_t *dst, uint32_t dst_len);
 
 int w154_parse_header(const uint8_t header[W154_HEADER_SIZE], w154_file_info *out);
 

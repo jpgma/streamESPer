@@ -23,18 +23,18 @@ static uint32_t crc32_of(const uint8_t *data, uint32_t len)
     return crc ^ 0xFFFFFFFFu;
 }
 
-static int rle_decode(const uint8_t *src, uint32_t src_len, uint8_t *dst)
+static int rle_decode(const uint8_t *src, uint32_t src_len, uint8_t *dst, uint32_t dst_len)
 {
     uint32_t ip = 0;
     uint32_t op = 0;
-    while (op < BAND_BYTES) {
+    while (op < dst_len) {
         if (ip >= src_len) {
             return -1;
         }
         uint8_t ctl = src[ip++];
         if (ctl < 128) {
             uint32_t n = (uint32_t)ctl + 1u;
-            if (ip + n > src_len || op + n > BAND_BYTES) {
+            if (ip + n > src_len || op + n > dst_len) {
                 return -1;
             }
             memcpy(dst + op, src + ip, n);
@@ -42,89 +42,86 @@ static int rle_decode(const uint8_t *src, uint32_t src_len, uint8_t *dst)
             op += n;
         } else {
             uint32_t n = (uint32_t)ctl - 127u;
-            if (ip >= src_len || op + n > BAND_BYTES) {
+            if (ip >= src_len || op + n > dst_len) {
                 return -1;
             }
             memset(dst + op, src[ip++], n);
             op += n;
         }
     }
-    return op == BAND_BYTES && ip == src_len ? 0 : -1;
+    return op == dst_len && ip == src_len ? 0 : -1;
 }
 
-static int read_len(const uint8_t *src, uint32_t src_len, uint32_t *ip, int nibble, int *out)
+static int pred_x(int x, int dx)
 {
-    int length = nibble;
-    if (nibble != 15) {
-        *out = length;
+    int src = x - dx;
+    if (src < 0) {
         return 0;
     }
-    for (;;) {
-        if (*ip >= src_len) {
-            return -1;
-        }
-        uint8_t extra = src[(*ip)++];
-        length += extra;
-        if (extra != 255) {
-            *out = length;
-            return 0;
-        }
+    if (src >= ROW_BYTES) {
+        return ROW_BYTES - 1;
     }
+    return src;
 }
 
-static int lz4_decode(const uint8_t *src, uint32_t src_len, uint8_t *dst)
+static int apply_row(uint8_t codec, int dx, const uint8_t *data, uint16_t comp, uint8_t *target, const uint8_t *previous)
 {
-    uint32_t ip = 0;
-    uint32_t op = 0;
-    while (ip < src_len) {
-        uint8_t token = src[ip++];
-        int lit_len = 0;
-        if (read_len(src, src_len, &ip, token >> 4, &lit_len) != 0 || lit_len < 0) {
+    if (codec == 0) {
+        if (dx != 0 || comp != ROW_BYTES) {
             return -1;
         }
-        if ((uint32_t)lit_len > BAND_BYTES - op || ip + (uint32_t)lit_len > src_len) {
-            return -1;
-        }
-        memcpy(dst + op, src + ip, (size_t)lit_len);
-        ip += (uint32_t)lit_len;
-        op += (uint32_t)lit_len;
-        if (ip >= src_len) {
-            break;
-        }
-        if (ip + 2 > src_len) {
-            return -1;
-        }
-        uint32_t offset = (uint32_t)src[ip] | ((uint32_t)src[ip + 1] << 8);
-        ip += 2;
-        if (offset == 0 || offset > op) {
-            return -1;
-        }
-        int extra = 0;
-        if (read_len(src, src_len, &ip, token & 0x0F, &extra) != 0) {
-            return -1;
-        }
-        uint32_t match_len = (uint32_t)extra + 4u;
-        if (op + match_len > BAND_BYTES) {
-            return -1;
-        }
-        uint32_t match = op - offset;
-        for (uint32_t i = 0; i < match_len; i++) {
-            dst[op++] = dst[match++];
-        }
+        memcpy(target, data, ROW_BYTES);
+        return 0;
     }
-    return op == BAND_BYTES ? 0 : -1;
+    if (comp == 0 || comp >= ROW_BYTES) {
+        return -1;
+    }
+    if (codec == 1) {
+        if (dx != 0) {
+            return -1;
+        }
+        return rle_decode(data, comp, target, ROW_BYTES);
+    }
+    if (codec == 3) {
+        if (dx != 0 || rle_decode(data, comp, target, ROW_BYTES) != 0) {
+            return -1;
+        }
+        uint8_t acc = target[0];
+        for (int x = 1; x < ROW_BYTES; x++) {
+            acc = (uint8_t)(acc + target[x]);
+            target[x] = acc;
+        }
+        return 0;
+    }
+    if (codec != 2 || previous == NULL || dx < -16 || dx > 16) {
+        return -1;
+    }
+    uint8_t residual[ROW_BYTES];
+    if (rle_decode(data, comp, residual, ROW_BYTES) != 0) {
+        return -1;
+    }
+    for (int x = 0; x < ROW_BYTES; x++) {
+        target[x] = (uint8_t)(previous[pred_x(x, dx)] + residual[x]);
+    }
+    return 0;
 }
 
-static void mark_band(uint8_t *rowmask, int band)
+static int mask_pop(const uint8_t *mask)
 {
-    for (int row = band * BAND_ROWS; row < (band + 1) * BAND_ROWS; row++) {
-        rowmask[row >> 3] = (uint8_t)(rowmask[row >> 3] | (uint8_t)(1u << (row & 7)));
+    int count = 0;
+    for (int i = 0; i < ROW_MASK_BYTES; i++) {
+        uint8_t bits = mask[i];
+        while (bits) {
+            count += bits & 1;
+            bits >>= 1;
+        }
     }
+    return count;
 }
 
 int w154_apply(const uint8_t *body, uint32_t len, uint8_t *dst, const uint8_t *src, uint16_t *palette, uint8_t *rowmask)
 {
-    if (len < 12 || len > ASM_BYTES) {
+    if (len < PREAMBLE_BYTES + 4 || len > ASM_BYTES) {
         return -1;
     }
     uint32_t stored = rd_u32(body + len - 4);
@@ -132,26 +129,23 @@ int w154_apply(const uint8_t *body, uint32_t len, uint8_t *dst, const uint8_t *s
         return -1;
     }
     uint16_t flags = rd_u16(body);
-    uint16_t band_count = rd_u16(body + 2);
-    uint32_t mask = rd_u32(body + 4);
-    if ((flags & ~0x3u) != 0 || (mask & 0xC0000000u) != 0) {
-        return -1;
-    }
-    uint32_t bits = mask;
-    int pop = 0;
-    while (bits) {
-        pop += (int)(bits & 1u);
-        bits >>= 1;
-    }
-    if (pop != band_count) {
+    uint16_t row_count = rd_u16(body + 2);
+    const uint8_t *mask = body + 4;
+    if ((flags & ~0x3u) != 0 || mask_pop(mask) != row_count) {
         return -1;
     }
 
     int key = (flags & 0x2) != 0;
-    const uint8_t *p = body + 8;
+    const uint8_t *p = body + PREAMBLE_BYTES;
     const uint8_t *end = body + len - 4;
     if (key) {
-        if (flags != 3 || band_count != BAND_COUNT || mask != 0x3FFFFFFFu) {
+        int full = 1;
+        for (int i = 0; i < ROW_MASK_BYTES; i++) {
+            if (mask[i] != 0xFF) {
+                full = 0;
+            }
+        }
+        if (flags != 3 || row_count != ROW_COUNT || !full) {
             return -1;
         }
         if ((size_t)(end - p) < PALETTE_COLORS * 2) {
@@ -167,41 +161,27 @@ int w154_apply(const uint8_t *body, uint32_t len, uint8_t *dst, const uint8_t *s
         memcpy(dst, src, INDEX_BYTES);
     }
 
-    memset(rowmask, 0, 30);
+    memset(rowmask, 0, ROW_MASK_BYTES);
     int seen = 0;
-    for (int band = 0; band < BAND_COUNT; band++) {
-        if ((mask & (1u << band)) == 0) {
+    for (int row = 0; row < ROW_COUNT; row++) {
+        if ((mask[row >> 3] & (uint8_t)(1u << (row & 7))) == 0) {
             continue;
         }
         if ((size_t)(end - p) < 4) {
             return -1;
         }
         uint8_t codec = p[0];
-        if (p[1] != 0) {
-            return -1;
-        }
+        int dx = (int8_t)p[1];
         uint16_t comp = rd_u16(p + 2);
         p += 4;
-        if (codec == 0 && comp != BAND_BYTES) {
+        if (codec > 3 || (key && codec == 2) || (!key && codec == 3)) {
             return -1;
         }
-        if ((codec == 1 || codec == 2) && (comp == 0 || comp >= BAND_BYTES)) {
+        if ((size_t)(end - p) < comp) {
             return -1;
         }
-        if (codec > 2 || (size_t)(end - p) < comp) {
-            return -1;
-        }
-        uint8_t *target = dst + band * BAND_BYTES;
-        int ok = -1;
-        if (codec == 0) {
-            memcpy(target, p, BAND_BYTES);
-            ok = 0;
-        } else if (codec == 1) {
-            ok = rle_decode(p, comp, target);
-        } else {
-            ok = lz4_decode(p, comp, target);
-        }
-        if (ok != 0) {
+        const uint8_t *previous = src == NULL ? NULL : src + row * ROW_BYTES;
+        if (apply_row(codec, dx, p, comp, dst + row * ROW_BYTES, previous) != 0) {
             return -1;
         }
         p += comp;
@@ -211,10 +191,10 @@ int w154_apply(const uint8_t *body, uint32_t len, uint8_t *dst, const uint8_t *s
                 return -1;
             }
         }
-        mark_band(rowmask, band);
+        rowmask[row >> 3] = (uint8_t)(rowmask[row >> 3] | (uint8_t)(1u << (row & 7)));
         seen++;
     }
-    if (seen != band_count || p != end) {
+    if (seen != row_count || p != end) {
         return -1;
     }
     return key ? 1 : 0;

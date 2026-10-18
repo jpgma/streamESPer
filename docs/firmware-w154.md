@@ -7,7 +7,11 @@ copy firmware\w154\main\wifi_secrets.example.h firmware\w154\main\wifi_secrets.h
 flash.bat
 flash.bat --port COM7
 flash.bat COM7
+flash.bat --monitor
+flash.bat --monitor --port COM7
 ```
+
+`flash.bat` grava e volta ao prompt. `--monitor` abre o serial numa janela própria; Ctrl+C nela encerra e solta a COM.
 
 `wifi_secrets.h` traz `WIFI_SSID`, `WIFI_PASS`, `HOST_IP` e `HOST_HELLO_PORT` (5091). A API lê o SSID desse arquivo. Cada `w154stream.bat` gera um UUID novo e usa esse valor como senha WPA2 do hotspot, gravando-o no header. Com o hotspot no ar, `flash.bat` na raiz chama `firmware/flash.ps1`, que relê o SSID, essa senha e o gateway dessa instância e regrava o header antes do `idf.py`. `HOST_IP` fica o endereço ICS, em geral `192.168.137.1`. O ESP-IDF esperado é o 5.5, em `%USERPROFILE%\esp\esp-idf` ou `IDF_PATH`.
 
@@ -19,7 +23,7 @@ O arquivo e os datagramas de vídeo e PCM estão em [formato-w154.md](formato-w1
 | --- | --- | --- |
 | Wi-Fi | 0 | STA, modem sleep desligado |
 | `rx` | 0 | três sockets, montagem do body, credit |
-| `decode` | 0 | RLE, LZ4, CRC, quadro indexado |
+| `decode` | 0 | RLE por linha, CRC, quadro indexado |
 | `audio` | 0 | ring de I2S e PA |
 | `present` | 1 | expand e SPI |
 | `bl` | 0 | fade do backlight e light sleep |
@@ -33,7 +37,7 @@ Carve único no boot. Nada de `malloc` no caminho do `frame`.
 | Buffer | Onde | Tamanho |
 | --- | --- | --- |
 | Dois quadros indexados | PSRAM | 57600 cada |
-| Scratch de decode | PSRAM | 58244 |
+| Scratch de decode | PSRAM | 59110 |
 | Ring de bodies | PSRAM | maior bloco livre, menos uma folga |
 | Tabela de slots | DRAM interna | 512 entradas |
 | Bounce duplo | DRAM interna, `DMA_ATTR` | `2 × 8 × 240 × 2` = 7680 |
@@ -50,7 +54,7 @@ O socket de vídeo usa `SO_RCVBUF` de 32 KiB. A API não deixa mais de 20 datagr
 
 ## Relógio
 
-`t0` é o instante em que o relógio solta, não o do primeiro keyframe. O present espera cerca de 3 s de bodies (entre 24 e 72 quadros) antes de mostrar o primeiro. Essa conta é `ring_queued` mais os dois slots que o decode já publicou. `ring_diag` zera o contador de salto e não serve aqui. Os dois slots não são o preroll: o decode esvazia o ring assim que um slot libera, então a folga tem de ficar na PSRAM. O `frame` `n` é devido em `n * frame_us`. Se a fila cai abaixo de 8 quadros, o relógio para e só volta quando os 3 s enchem de novo. O `media_us` fica congelado, então a volta não adianta os quadros que já eram devidos. Enquanto chega dado, essa espera não abre a tela de enlace. A tela de enlace continua só quando a fila fica em 0 por 300 ms, ou quando não há IP.
+`t0` é o instante em que o relógio solta, não o do primeiro keyframe. O present espera cerca de 3 s de bodies antes de mostrar o primeiro, sem passar do que um body de 59110 bytes cabe no ring (`cap / 59110`) nem de `512 - 32` slots. A 24 fps a meta de 72 quadros ainda cabe. A 80 fps o teto fica perto de 1,7 s, e um stream gordo não espera uma meta que o ring nunca segura. `frame_us` abaixo de 12500 é recusado. Essa conta é `ring_queued` mais os dois slots que o decode já publicou. `ring_diag` zera o contador de salto e não serve aqui. Os dois slots não são o preroll: o decode esvazia o ring assim que um slot libera, então a folga tem de ficar na PSRAM. O `frame` `n` é devido em `n * frame_us`. Se a fila cai abaixo de 8 quadros, o relógio para e só volta quando a meta enche de novo. O `media_us` fica congelado, então a volta não adianta os quadros que já eram devidos. Enquanto chega dado, essa espera não abre a tela de enlace. A tela de enlace continua só quando a fila fica em 0 por 300 ms, ou quando não há IP.
 
 Underrun: o próximo body ainda não está no ring e não houve buraco de `seq`. O relógio do vídeo pausa, o bit 30 do credit sobe, e o `rx` continua. O canal I2S é desligado nesse instante. O DMA são 8 blocos de 480 amostras, cerca de 80 ms a 48 kHz; se ele seguir, a imagem parada ainda soa. O PA fica ligado nesse buraco curto. Quando a fila volta ao patamar de 3 s, o relógio retoma de onde parou, salvo pause do operador.
 
@@ -62,15 +66,15 @@ Perda: `seq` furou. O `frame` em montagem é descartado, e os deltas seguintes t
 
 Pause do operador: o mesmo congelamento do relógio, com o bit 31. O socket não fecha. O ring enche até `free_bytes` zerar.
 
-Delta vazio não chama SPI. Band com bit desligado não entra no row mask. O bit `i` do `band_mask` liga as linhas `[8i, 8i+8)` no mask de 30 bytes.
+Delta vazio não chama SPI, salvo as linhas 0..15 quando os dígitos de fps estão ligados. O arquivo já traz um bit por linha. O decode liga esse bit no mask de 30 bytes. Não há LZ4 nem ADPCM no firmware.
 
 ## Present
 
-O slot publicado tem o quadro indexado, a palette e o row mask. O core 1 expande cada band suja para o bounce e envia a faixa por `spi_device_polling_transmit`: CASET `0x2A`, RASET `0x2B`, RAMWR `0x2C`, com o callback de DC do driver. O bounce fica na DRAM interna (`DMA_ATTR`).
+O slot publicado tem o quadro indexado, a palette e o row mask. O core 1 junta linhas sujas consecutivas em rajadas de no máximo 8, não necessariamente alinhadas, e envia cada rajada por `spi_device_polling_transmit`: CASET `0x2A`, RASET `0x2B`, RAMWR `0x2C`, com o callback de DC do driver. As linhas 0..15 saem sempre, para os dígitos de fps. O bounce fica na DRAM interna (`DMA_ATTR`) e continua com 8 linhas. A marca de enlace ainda pinta 30 faixas de 8.
 
 `esp_lcd_panel_draw_bitmap` enfileira o DMA e o comando seguinte espera o anterior dentro do driver. Uma contagem própria de transferências em voo, com espera bloqueante no fim do quadro, travou o present depois de cerca de 10–12 s a 24 fps: o log de `pic` para, os slots do ring sobem e o áudio entra em underrun porque `play_frame` não anda.
 
-As duas primeiras bands levam o número de fps no canto superior direito, só os dígitos, fonte 5×7 em escala 2. A palette do arquivo é a cor de antes do invert. Com `LCD_INVERT_COLOR`, o pixel `0x0000` sai preto no vidro e `0xFFFF` sai branco. O fundo da marca de desconexão é `0x0000`. O painel é ST7789, SPI modo 3 a 80 MHz. O USB do módulo anuncia VID `303A`. O STA pega DHCP no hotspot; o endereço muda entre associações.
+As linhas 0..15 levam o número de fps no canto superior direito, só os dígitos, fonte 5×7 em escala 2. A palette do arquivo é a cor de antes do invert. Com `LCD_INVERT_COLOR`, o pixel `0x0000` sai preto no vidro e `0xFFFF` sai branco. O fundo da marca de desconexão é `0x0000`. O painel é ST7789, SPI modo 3 a 80 MHz. O USB do módulo anuncia VID `303A`. O STA pega DHCP no hotspot; o endereço muda entre associações.
 
 Sem IP, ou sem o próximo quadro por mais de 300 ms, o relógio para, o PA desce e o quadro deixa de ir ao painel. A tela fica preta e um círculo cortado pisca no centro, meio segundo aceso e meio apagado, para não gravar uma imagem parada. O I2S para no mesmo instante, para não sobrar áudio no DMA. Ao voltar o quadro, a tela inteira é redesenhada.
 

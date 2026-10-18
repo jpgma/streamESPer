@@ -46,7 +46,44 @@ static class Quantizer
         public float B { get; }
     }
 
-    public static Palette Build(IReadOnlyList<byte[]> frames, bool reserveBlack, Palette? previous)
+    public static Palette Build(IReadOnlyList<byte[]> frames, bool reserveBlack, Palette? previous, int maxColors = 256)
+    {
+        int cap = Math.Clamp(maxColors, 1, PictureContract.PaletteColors);
+        return OrderByLuminance(BuildUnsorted(frames, reserveBlack, previous, cap), reserveBlack);
+    }
+
+    public static float StepDistance()
+    {
+        ushort mid = Rgb565.Pack(128, 128, 128);
+        ushort step = Rgb565.Pack(128, 132, 128);
+        return ColorSpace.Distance(mid, step);
+    }
+
+    static Palette OrderByLuminance(Palette palette, bool pinBlack)
+    {
+        int count = palette.Count;
+        var order = new int[count];
+        for (int i = 0; i < count; i++)
+            order[i] = i;
+        int start = pinBlack ? 1 : 0;
+        if (count - start > 1)
+        {
+            Array.Sort(order, start, count - start, Comparer<int>.Create((left, right) =>
+            {
+                ColorSpace.Oklab(palette.Entries[left], out float ll, out _, out _);
+                ColorSpace.Oklab(palette.Entries[right], out float rl, out _, out _);
+                int byL = ll.CompareTo(rl);
+                return byL != 0 ? byL : palette.Entries[left].CompareTo(palette.Entries[right]);
+            }));
+        }
+
+        var entries = new ushort[PictureContract.PaletteColors];
+        for (int i = 0; i < count; i++)
+            entries[i] = palette.Entries[order[i]];
+        return new Palette(entries, count, BuildLut(entries, count), palette.Error);
+    }
+
+    static Palette BuildUnsorted(IReadOnlyList<byte[]> frames, bool reserveBlack, Palette? previous, int cap)
     {
         var hist = new int[65536];
         int pixels = PictureContract.Pixels;
@@ -61,7 +98,7 @@ static class Quantizer
             }
         }
 
-        int free = reserveBlack ? PictureContract.PaletteColors - 1 : PictureContract.PaletteColors;
+        int free = reserveBlack ? cap - 1 : cap;
         var colors = new List<Bin>(1024);
         for (int i = 0; i < hist.Length; i++)
         {

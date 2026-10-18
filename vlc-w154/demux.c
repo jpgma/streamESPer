@@ -91,11 +91,31 @@ static int SendAudio(demux_t *demux, uint32_t start, uint32_t end)
     if (block == NULL)
         return -1;
 
-    uint64_t at = sys->pcm_offset + (uint64_t)start * 2u;
-    if (vlc_stream_Seek(demux->s, at) != 0 || ReadExact(demux->s, block->p_buffer, (size_t)count * 2u) != 0) {
-        block_Release(block);
-        msg_Err(demux, "falha ao ler o PCM");
-        return -1;
+    uint32_t filled = 0;
+    while (filled < count) {
+        uint32_t abs = start + filled;
+        uint32_t block_index = abs / W154_IMA_SAMPLES;
+        uint32_t local = abs % W154_IMA_SAMPLES;
+        uint32_t block_samples = sys->audio_info.sample_count - block_index * W154_IMA_SAMPLES;
+        if (block_samples > W154_IMA_SAMPLES)
+            block_samples = W154_IMA_SAMPLES;
+        uint32_t nbytes = w154_ima_block_bytes(block_samples);
+        uint8_t raw[W154_IMA_BLOCK];
+        int16_t decoded[W154_IMA_SAMPLES];
+        uint64_t at = sys->pcm_offset + (uint64_t)block_index * W154_IMA_BLOCK;
+        if (nbytes > W154_IMA_BLOCK
+            || vlc_stream_Seek(demux->s, at) != 0
+            || ReadExact(demux->s, raw, nbytes) != 0
+            || w154_ima_decode_block(raw, block_samples, decoded) != 0) {
+            block_Release(block);
+            msg_Err(demux, "falha ao ler o ADPCM");
+            return -1;
+        }
+        uint32_t take = block_samples - local;
+        if (take > count - filled)
+            take = count - filled;
+        memcpy(block->p_buffer + (size_t)filled * 2u, decoded + local, (size_t)take * 2u);
+        filled += take;
     }
 
     uint64_t pts_us = w154_sample_time(start, sys->audio_info.sample_rate);

@@ -5,6 +5,7 @@ public static class AudioPcm
     public const int HeaderBytes = 16;
     public const int Channels = 1;
     public const int FormatS16Le = 0;
+    public const int FormatIma = 1;
     public const int DefaultSampleRate = 48000;
 
     public static bool IsRate(int sampleRate) => sampleRate is 16000 or 24000 or 48000;
@@ -43,6 +44,22 @@ public static class AudioPcm
 
         source.Position = start;
         return Crc32.Finish(crc);
+    }
+
+    public static void ReadFitted(Stream source, Span<byte> fitted)
+    {
+        int filled = 0;
+        while (filled < fitted.Length)
+        {
+            int n = source.Read(fitted[filled..]);
+            if (n == 0)
+            {
+                fitted[filled..].Clear();
+                return;
+            }
+
+            filled += n;
+        }
     }
 
     public static void CopyFitted(Stream source, Stream dest, int pcmBytes)

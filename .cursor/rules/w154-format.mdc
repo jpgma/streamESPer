@@ -6,24 +6,25 @@ alwaysApply: false
 
 # Formato `.w154`
 
-`W154Format` é o único lugar de CRC, RLE, LZ4, header, body e bloco PCM. O conversor e a API referenciam este projeto. Não duplicar codec.
+`W154Format` é o único lugar de CRC, RLE de linha, IMA ADPCM, header, body e bloco de áudio. O conversor e a API referenciam este projeto. Não duplicar codec.
 
 ## Projeto
 
 - `net10.0`, `IsAotCompatible`, `InvariantGlobalization`, sem `PackageReference`.
 - Sem reflexão, `Regex` interpretado ou API que exija ICU.
-- Identificadores e nomes de campo em inglês (`frame_us`, `band_mask`, `body_bytes`, `keyframe`, `gop`).
+- Identificadores e nomes de campo em inglês (`frame_us`, `row_mask`, `body_bytes`, `keyframe`, `gop`).
 - Erro e comentário em pt-BR.
 
 ## Contrato
 
+- Versão 2. `band_rows` 1, `band_count_max` 240. Um record é uma linha de 240 índices.
 - RGB565: `(R >> 3) << 11 | (G >> 2) << 5 | (B >> 3)`, little-endian, sem o invert do painel.
-- `frame_us = (1000000 + fps / 2) / fps`. `gop = max(1, (1000000 + frame_us / 2) / frame_us)`.
-- Keyframe: `flags = 3`, 30 bands, `band_mask = 0x3FFFFFFF`, palette de 256. Delta não traz palette. Delta vazio é válido.
-- PCM mono s16le a 16000, 24000 ou 48000. `audio_offset` 0 é arquivo sem áudio.
-- Por band, RLE e um bloco LZ4. Descartar `comp_bytes >= 1920`. O menor ganha. Empate fica RLE. Senão, raw de 1920.
-- CRC32 PNG/zlib cobre o body antes do campo, e o PCM à parte. `body_bytes` máximo 58244.
-- O leitor de envio (`W154Movie`) expõe spans do body e do PCM. Não decodifica band no caminho de envio.
+- `frame_us = (1000000 + fps / 2) / fps`, em `12500 .. 1000000`. `gop = max(1, (1000000 + frame_us / 2) / frame_us)`.
+- Keyframe: `flags = 3`, 240 linhas, máscara toda ligada, palette de 256. Delta não traz palette. Delta vazio tem 38 bytes.
+- Áudio no arquivo é IMA ADPCM mono (`sample_format` 1) a 16000, 24000 ou 48000. s16le no arquivo é recusado. `audio_offset` 0 é arquivo sem áudio. Bloco cheio: 256 bytes, 505 amostras, nibble baixo primeiro.
+- Por linha, RLE absoluto, delta à esquerda no keyframe, resíduo com `dx` de −16 a 16 no delta. Descartar `comp_bytes >= 240`. O menor ganha. Empate fica com o codec tentado antes. Senão, raw de 240. Sem LZ4.
+- CRC32 PNG/zlib cobre o body antes do campo, e o ADPCM à parte. `body_bytes` máximo 59110.
+- O leitor de envio (`W154Movie`) expõe o body e expande o ADPCM para s16 no `ReadPcm`. Não manda nibble.
 
 ## Quando o formato mudar
 

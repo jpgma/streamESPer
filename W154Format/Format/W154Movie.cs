@@ -66,8 +66,18 @@ public sealed unsafe class W154Movie : IDisposable
         return new ReadOnlySpan<byte>(_ptr + (nint)frame.BodyOffset, frame.BodyBytes);
     }
 
+    public int SampleCount =>
+        Audio.Present ? AudioPcm.SampleCount(FrameCount, FrameUs, Audio.SampleRate) : 0;
+
     public ReadOnlySpan<byte> Pcm =>
         Audio.Present ? new ReadOnlySpan<byte>(_ptr + (nint)Audio.PcmOffset, Audio.PcmBytes) : ReadOnlySpan<byte>.Empty;
+
+    public void ReadPcm(int sampleIndex, Span<byte> s16le)
+    {
+        if (!Audio.Present)
+            throw new W154Exception("arquivo sem áudio.");
+        ImaAdpcm.DecodeAt(Pcm, SampleCount, sampleIndex, s16le);
+    }
 
     public static W154Movie Open(string path)
     {
@@ -117,12 +127,12 @@ public sealed unsafe class W154Movie : IDisposable
         if (file[0] != (byte)'W' || file[1] != (byte)'1' || file[2] != (byte)'5' || file[3] != (byte)'4')
             throw new W154Exception("magic diferente de W154.");
         if (U16(file, 4) != PictureContract.Version)
-            throw new W154Exception("version diferente de 1.");
+            throw new W154Exception("version diferente de 2.");
         if (U16(file, 6) != PictureContract.HeaderSize)
             throw new W154Exception("header_size diferente de 32.");
         if (U16(file, 8) != PictureContract.Width || U16(file, 10) != PictureContract.Height)
             throw new W154Exception("width ou height diferente de 240.");
-        if (U16(file, 12) != PictureContract.BandRows || U16(file, 14) != PictureContract.BandCount)
+        if (U16(file, 12) != PictureContract.BandRows || U16(file, 14) != PictureContract.BandCountMax)
             throw new W154Exception("band_rows ou band_count_max diferente do contrato.");
         if (U32(file, 24) != 0)
             throw new W154Exception("flags do header não são 0.");
@@ -132,8 +142,8 @@ public sealed unsafe class W154Movie : IDisposable
         uint audioOffset = U32(file, 28);
         if (count < 1)
             throw new W154Exception("frame_count menor que 1.");
-        if (us is < 16667 or > 1_000_000)
-            throw new W154Exception("frame_us fora de 16667..1000000.");
+        if (!PictureContract.FrameUsOk((int)us))
+            throw new W154Exception("frame_us fora de 12500..1000000.");
         if ((long)PictureContract.HeaderSize + count * 4L > length)
             throw new W154Exception("tabela de offsets não cabe no arquivo.");
 
@@ -174,12 +184,15 @@ public sealed unsafe class W154Movie : IDisposable
         uint sampleRate = U32(file, audioOffset + 4);
         ushort channels = U16(file, audioOffset + 8);
         ushort format = U16(file, audioOffset + 10);
-        if (pcmBytes == 0 || (pcmBytes & 1) != 0 || pcmBytes > int.MaxValue)
+        if (pcmBytes == 0 || (pcmBytes & 3) != 0 || pcmBytes > int.MaxValue)
             throw new W154Exception("pcm_bytes inválido.");
         if (!AudioPcm.IsRate((int)sampleRate))
             throw new W154Exception("sample_rate fora de 16000, 24000 e 48000.");
-        if (channels != AudioPcm.Channels || format != AudioPcm.FormatS16Le)
-            throw new W154Exception("PCM que não é mono s16le.");
+        if (channels != AudioPcm.Channels || format != AudioPcm.FormatIma)
+            throw new W154Exception("áudio que não é IMA ADPCM mono.");
+        int sampleCount = AudioPcm.SampleCount((int)count, (int)us, (int)sampleRate);
+        if (pcmBytes != (uint)ImaAdpcm.PayloadBytes(sampleCount))
+            throw new W154Exception("pcm_bytes não cobre a duração do vídeo.");
         long pcmOffset = audioOffset + (long)AudioPcm.HeaderBytes;
         if (pcmOffset + pcmBytes != length)
             throw new W154Exception("o PCM não termina no fim do arquivo.");

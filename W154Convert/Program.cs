@@ -128,9 +128,9 @@ static class Program
         while (true)
         {
             string text = Ask(label, current.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if (int.TryParse(text, out int value) && value is >= 1 and <= 60)
+            if (int.TryParse(text, out int value) && value is >= 1 and <= PictureContract.MaxFps)
                 return value;
-            Console.Error.WriteLine("use um fps inteiro de 1 a 60.");
+            Console.Error.WriteLine("use um fps inteiro de 1 a 80.");
         }
     }
 
@@ -219,7 +219,7 @@ static class Program
             w154 --input video.mp4 --sample-rate 16000 --no-audio
             w154 selftest
 
-            --fps                  inteiro de 1 a 60 (padrão 24)
+            --fps                  inteiro de 1 a 80 (padrão 24)
             --dither               none, ordered ou fs (padrão none). Sozinho, fs
             --sample-rate          16000, 24000 ou 48000 (padrão 48000), mono s16le
             --no-audio             não grava PCM, mesmo se a origem tiver áudio
