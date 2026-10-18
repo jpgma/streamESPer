@@ -12,10 +12,12 @@ Player do painel Waveshare. C, sem C++. Comentário em pt-BR no formato `[fn] o 
 
 - Sem `malloc` depois do boot. Ring, quadros indexados e o buffer de montagem saem de um carve na PSRAM. Bounce e ring de I2S ficam na DRAM interna.
 - Core 0: Wi-Fi, sockets, credit, decode e I2S. Core 1: expand e SPI. O core 1 não chama `recv`.
-- Bounce duplo de 8 linhas (`2 × 8 × 240 × 2` bytes), `DMA_ATTR`. Band limpa não gera SPI. Delta vazio não redesenha.
+- Bounce duplo de 8 linhas (`2 × 8 × 240 × 2` bytes), `DMA_ATTR`, na DRAM interna. Band limpa não gera SPI. Delta vazio não redesenha.
+- O painel sai por `spi_device_polling_transmit` (CASET `0x2A`, RASET `0x2B`, RAMWR `0x2C`). Sem contagem de DMA em voo por cima de `draw_bitmap`: isso trava o present depois de ~10 s a 24 fps.
+- `free_bytes` é a cauda livre. Fila vazia anuncia o ring inteiro. Não descontar os bytes que ainda faltam no body parcial.
 - Dois quadros indexados. Publicação por índice atômico, sem fila de frames.
-- Underrun pausa o relógio e continua recebendo. Buraco de `seq` descarta até o próximo keyframe.
-- Áudio: PCM mono na DRAM interna, dezenas de ms, PA do GPIO7 só enquanto há amostra. Sem ES7210.
+- Underrun pausa o relógio, desliga o I2S na hora e continua recebendo. Sem o próximo quadro por 300 ms, ou sem IP, a tela fica preta com a marca piscando e o PA desce. Pause e eos não usam essa tela. Buraco de `seq` descarta até o próximo keyframe.
+- Áudio: PCM mono de 400 ms na DRAM interna. PA do GPIO7 no pause, no reset, sem IP, com o backlight apagado e na marca de desconexão. Sem ES7210.
 
 ## Rede
 

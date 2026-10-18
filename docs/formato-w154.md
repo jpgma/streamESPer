@@ -67,6 +67,8 @@ audio_offset != 0: bloco de áudio começa nesse byte e o arquivo acaba no fim d
 
 Não há bytes entre o header e a tabela, nem entre a tabela e o primeiro quadro, nem entre quadros. Com áudio, o bloco começa no byte seguinte ao último body.
 
+Os offsets são `u32`. O arquivo pode passar de 2 GiB e tem de ficar abaixo de 4 GiB. No leitor .NET o comprimento de um `Span` é `int`, então body e PCM são endereçados por ponteiro mais o offset.
+
 ## Header
 
 | Offset | Tipo | Campo | v1 |

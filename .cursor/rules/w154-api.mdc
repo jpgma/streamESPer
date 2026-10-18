@@ -19,7 +19,8 @@ Processo ASP.NET Core que o operador controla por HTTP e que empurra vídeo e PC
 
 - Vídeo e áudio seguem `docs/formato-w154.md` (seção No ar), cada um no seu socket de destino. Sem type byte no datagrama de vídeo.
 - Hello, credit e control são o protocolo de `docs/api-w154.md`. Não misturar com o body.
-- O vídeo sai na velocidade do `SendTo`, freado só pelo crédito (`free_bytes` menos o que já saiu depois de `expect_seq`). Sem sleep por `frame_us`.
-- O PCM fica cerca de 80 ms à frente do `play_frame` reportado. Não entra no ring de vídeo.
+- O vídeo sai na velocidade do `SendTo`, freado pelo crédito (`free_bytes` menos o que já saiu depois de `expect_seq`) e por no máximo 20 datagramas de 1456 no ar. Sem sleep por `frame_us`. O PCM sai antes do vídeo em cada volta.
+- O PCM fica cerca de 350 ms à frente do `play_frame` reportado. Não entra no ring de vídeo. O device ignora `time_us`.
+- Hello com o mesmo IP e as mesmas portas não zera o cursor. Outro `POST /play` é o que manda `reset` depois de gravar o firmware.
 - Um client por vez. Hello novo substitui o anterior. Um arquivo por `POST /play`.
 - `POST /play` recusa nome com separador de pasta ou `..`.

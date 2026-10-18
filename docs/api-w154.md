@@ -20,6 +20,8 @@ dotnet run --project W154Stream -- --selftest
 
 `w154stream.bat` na raiz abre outra console e sobe o Release gerado por `build.bat --api`. O hotspot 2.4 GHz usa o `WIFI_SSID` de `firmware/w154/main/wifi_secrets.h` e uma senha UUID nova a cada lançamento. O script grava essa senha e o gateway ICS no header. `flash.bat`, com esse hotspot ligado, regrava o mesmo header a partir da instância em execução e compila o firmware com esses valores. Fechar essa console, ou Ctrl+C nela, derruba o hotspot. `--dir`, `--http` e `--hello` são os mesmos desta página.
 
+`dotnet run` não sobe nem segura o hotspot. O AP pode cair com a API ainda escutando. Religar usa a senha que já está em `wifi_secrets.h`. Outro `w154stream.bat` gera outro UUID, e o firmware já gravado não entra nessa rede. Matar o monitor serial pode deixar a COM ocupada (`semaphore timeout`) mesmo sem processo na porta; a gravação seguinte, com a porta livre, segue.
+
 Publicar nativo:
 
 ```text
@@ -57,7 +59,7 @@ O host escuta o hello em `--hello`. O device escolhe as três portas de recepç�
 | áudio | host → `audio_port` | PCM |
 | control | host → `control_port` | reset, pause, resume, áudio, eos |
 
-Um hello novo substitui o client anterior e zera o cursor de envio.
+Um hello com outro IP ou outras portas substitui o client e, se já houver arquivo armado, pede `reset`. O mesmo IP e as mesmas portas não zeram o cursor. Gravar o firmware de novo exige outro `POST /play` para o device receber `reset`. O STA muda de endereço entre associações.
 
 ## Hello
 
@@ -119,12 +121,12 @@ Opcode desconhecido ou `file_token` velho é ignorado.
 
 Iguais ao arquivo. Vídeo: `seq`, `frame_index`, `frag_index`, `frag_count`, `payload_bytes` 1..1456, reserved 0, depois um pedaço do body. `seq` sobe 1 em todo datagrama de vídeo, atravessando quadros. Áudio: `seq` próprio, `time_us` da primeira amostra, `payload_bytes` par 2..1456.
 
-O host não dorme entre fragmentos do mesmo `frame`. Só segura quando o crédito não cabe o próximo payload.
+O host não dorme entre fragmentos do mesmo `frame`. Só segura quando o crédito não cabe o próximo payload. Em cada volta o PCM sai antes do vídeo. No máximo 20 datagramas de vídeo de 1456 bytes ficam no ar ao mesmo tempo: o `SO_RCVBUF` do socket de vídeo no device é 32 KiB, e uma rajada maior perde UDP.
 
-O PCM anda pelo playhead, não pelo ring:
+O PCM anda pelo playhead, não pelo ring. O device ignora `time_us` e enfileira na ordem.
 
 ```text
-alvo_us = play_frame * frame_us + 80000
+alvo_us = play_frame * frame_us + 350000
 ```
 
-A API manda as amostras cujo instante cai até `alvo_us`. No pause do operador ela para o PCM, e o vídeo segue enquanto houver `free_bytes`.
+A API manda as amostras cujo instante cai até `alvo_us`. No pause do operador ela para o PCM, e o vídeo segue enquanto houver `free_bytes`. O `free_bytes` tem de caber o fragmento que termina o body em curso. Um crédito de algumas centenas de bytes com o quadro pela metade trava o envio; o firmware anuncia a cauda inteira nesse caso.
