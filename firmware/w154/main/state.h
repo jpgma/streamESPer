@@ -23,6 +23,7 @@ typedef struct {
     atomic_int reading;
     atomic_llong media_us;
     atomic_int clock_run;
+    atomic_int link_screen;
 } shared_t;
 
 typedef struct {

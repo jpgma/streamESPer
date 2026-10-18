@@ -46,6 +46,7 @@ static int s_held;
 static int s_link_phase;
 static int s_link_logged;
 static int s_dark;
+static int64_t s_stall_at;
 
 static const char *TAG = "w154";
 
@@ -294,6 +295,43 @@ static void clock_start(void)
     atomic_store(&g.clock_run, 1);
 }
 
+static void hold_link(void)
+{
+    if (s_started) {
+        clock_stop(0);
+    }
+    if (!s_link_logged) {
+        ESP_LOGW(TAG, "sem enlace");
+        s_link_logged = 1;
+    }
+    s_held = 1;
+    atomic_store(&g.link_screen, 1);
+    int phase = (int)((esp_timer_get_time() / 500000) & 1);
+    if (phase != s_link_phase) {
+        s_link_phase = phase;
+        paint_link(phase);
+    }
+}
+
+static void release_link(void)
+{
+    if (!s_held) {
+        return;
+    }
+    s_held = 0;
+    s_stall_at = 0;
+    atomic_store(&g.link_screen, 0);
+    if (s_link_phase == 1) {
+        paint_link(0);
+    }
+    s_link_phase = -1;
+    s_repaint = 1;
+    if (s_link_logged) {
+        ESP_LOGI(TAG, "enlace");
+        s_link_logged = 0;
+    }
+}
+
 void present_init(esp_lcd_panel_handle_t panel, esp_lcd_panel_io_handle_t io)
 {
     (void)panel;
@@ -320,6 +358,10 @@ void present_reset(void)
     s_late_max = 0;
     s_repaint = 0;
     s_link_phase = -1;
+    s_stall_at = 0;
+    s_held = 0;
+    s_link_logged = 0;
+    atomic_store(&g.link_screen, 0);
     atomic_store(&g.media_us, 0);
     atomic_store(&g.clock_run, 0);
     atomic_store(&g.reading, -1);
@@ -350,33 +392,9 @@ void present_task(void *arg)
         }
 
         if (!atomic_load(&g.have_ip)) {
-            if (s_started) {
-                clock_stop(0);
-            }
-            if (!s_link_logged) {
-                ESP_LOGW(TAG, "sem enlace");
-                s_link_logged = 1;
-            }
-            s_held = 1;
-            int phase = (int)((esp_timer_get_time() / 500000) & 1);
-            if (phase != s_link_phase) {
-                s_link_phase = phase;
-                paint_link(phase);
-            }
+            hold_link();
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
-        }
-        if (s_held) {
-            s_held = 0;
-            if (s_link_phase == 1) {
-                paint_link(0);
-            }
-            s_link_phase = -1;
-            s_repaint = 1;
-            if (s_link_logged) {
-                ESP_LOGI(TAG, "enlace");
-                s_link_logged = 0;
-            }
         }
 
         uint32_t flags = atomic_load(&g.flags);
@@ -409,10 +427,20 @@ void present_task(void *arg)
             int eos = (atomic_load(&g.flags) & PF_EOS) != 0;
             if (!eos && s_have_shown) {
                 clock_stop(1);
+                if (s_stall_at == 0) {
+                    s_stall_at = esp_timer_get_time();
+                }
+            } else {
+                s_stall_at = 0;
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
+            if (s_stall_at != 0 && esp_timer_get_time() - s_stall_at >= 300000) {
+                hold_link();
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
+        s_stall_at = 0;
+        release_link();
 
         if (!s_started) {
             clock_start();

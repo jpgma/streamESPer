@@ -151,7 +151,17 @@ uint32_t ring_free_bytes(void)
         slot_t *slot = &s_q[s_qt];
         uint32_t reserve = (uint32_t)(slot->frags - slot->got) * VIDEO_PAYLOAD;
         room = tail_room();
-        room = room > reserve ? room - reserve : 0;
+        /* O crédito tem de caber o resto deste body. Esconder essa reserva trava o host. */
+        if (room < reserve) {
+            rewind_partial();
+            s_skip_key = 1;
+            s_skipped++;
+            if (!s_partial && s_qn == 0) {
+                xSemaphoreGive(s_mu);
+                return s_cap;
+            }
+            room = tail_room();
+        }
     }
     if (s_qn + RING_SLOT_MARGIN >= RING_SLOTS) {
         room = 0;

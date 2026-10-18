@@ -59,7 +59,7 @@ Delta vazio não chama SPI. Band com bit desligado não entra no row mask. O bit
 
 O slot publicado tem o quadro indexado, a palette e o row mask. O core 1 expande cada band suja para o bounce e envia a faixa por SPI em polling, sem a fila de interrupção do `draw_bitmap`. As duas primeiras bands levam o número de fps no canto superior direito, só os dígitos. A palette do arquivo é a cor de antes do invert; o painel inverte na inicialização.
 
-Sem IP o relógio para, o PA desce e o quadro deixa de ir ao painel. A tela fica preta e um círculo cortado pisca no centro, meio segundo aceso e meio apagado, para não gravar uma imagem parada. Ao associar de novo o próximo quadro redesenha a tela inteira.
+Sem IP, ou sem o próximo quadro por mais de 300 ms, o relógio para, o PA desce e o quadro deixa de ir ao painel. A tela fica preta e um círculo cortado pisca no centro, meio segundo aceso e meio apagado, para não gravar uma imagem parada. O I2S para no mesmo instante, para não sobrar áudio no DMA. Ao voltar o quadro, a tela inteira é redesenhada.
 
 O botão PWR (GPIO5) faz o fade do backlight no GPIO46, 420 ms entre aceso e apagado. Com o vidro apagado o relógio e o PA param. 30 s depois o rádio desce e o chip entra em light sleep até o PWR baixar de novo. Na volta o painel é reiniciado sem pulsar o RST, o Wi-Fi sobe e o backlight acende.
 

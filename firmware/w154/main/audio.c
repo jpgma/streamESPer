@@ -245,12 +245,13 @@ void audio_task(void *arg)
         int paused = (atomic_load(&g.flags) & PF_PAUSE) != 0;
         int linked = atomic_load(&g.have_ip) != 0;
         int lit = backlight_lit();
+        int cover = atomic_load(&g.link_screen) != 0;
         int have = 0;
         taskENTER_CRITICAL(&s_mux);
         have = s_count;
         taskEXIT_CRITICAL(&s_mux);
         audio_log((uint32_t)have);
-        if (paused || s_rate == 0 || !linked || !lit) {
+        if (paused || s_rate == 0 || !linked || !lit || cover) {
             if (s_pa) {
                 gpio_set_level(PIN_PA, 0);
                 s_pa = 0;
@@ -261,6 +262,7 @@ void audio_task(void *arg)
             continue;
         }
         if (!clock) {
+            i2s_stop();
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
@@ -280,6 +282,10 @@ void audio_task(void *arg)
         if (esp_timer_get_time() - s_pa_at < 35000) {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
+        }
+        if (s_tx && !s_tx_on) {
+            i2s_channel_enable(s_tx);
+            s_tx_on = 1;
         }
         taskENTER_CRITICAL(&s_mux);
         have = s_count;
