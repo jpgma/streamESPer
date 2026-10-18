@@ -2,11 +2,12 @@ namespace W154Convert;
 
 sealed class Palette
 {
-    public Palette(ushort[] entries, int count, byte[] lut)
+    public Palette(ushort[] entries, int count, byte[] lut, float error)
     {
         Entries = entries;
         Count = count;
         Lut = lut;
+        Error = error;
     }
 
     public ushort[] Entries { get; }
@@ -14,47 +15,101 @@ sealed class Palette
     public int Count { get; }
 
     public byte[] Lut { get; }
+
+    public float Error { get; }
 }
 
 static class Quantizer
 {
+    const int Passes = 4;
+    const float SeedMargin = 1.10f;
+
     readonly struct Bin
     {
-        public Bin(ushort value, int count)
+        public Bin(ushort value, int count, float l, float a, float b)
         {
             Value = value;
             Count = count;
+            L = l;
+            A = a;
+            B = b;
         }
 
         public ushort Value { get; }
 
         public int Count { get; }
+
+        public float L { get; }
+
+        public float A { get; }
+
+        public float B { get; }
     }
 
-    public static Palette Build(IReadOnlyList<ushort[]> frames, bool reserveBlack)
+    public static Palette Build(IReadOnlyList<byte[]> frames, bool reserveBlack, Palette? previous)
     {
         var hist = new int[65536];
-        foreach (ushort[] frame in frames)
+        int pixels = PictureContract.Pixels;
+        foreach (byte[] frame in frames)
         {
-            foreach (ushort pixel in frame)
-                hist[pixel]++;
+            if (frame.Length < pixels * 3)
+                throw new W154Exception("quadro RGB24 inválido.");
+            for (int i = 0; i < pixels; i++)
+            {
+                int p = i * 3;
+                hist[Rgb565.Pack(frame[p], frame[p + 1], frame[p + 2])]++;
+            }
         }
 
-        var colors = new List<Bin>();
+        int free = reserveBlack ? PictureContract.PaletteColors - 1 : PictureContract.PaletteColors;
+        var colors = new List<Bin>(1024);
         for (int i = 0; i < hist.Length; i++)
         {
             if (hist[i] == 0)
                 continue;
             if (reserveBlack && i == 0)
                 continue;
-            colors.Add(new Bin((ushort)i, hist[i]));
+            ColorSpace.Oklab((ushort)i, out float l, out float a, out float b);
+            colors.Add(new Bin((ushort)i, hist[i], l, a, b));
         }
 
-        int slots = reserveBlack ? PictureContract.PaletteColors - 1 : PictureContract.PaletteColors;
-        ushort[] chosen = colors.Count <= slots
-            ? colors.Select(c => c.Value).OrderBy(v => v).ToArray()
-            : MedianCut(colors, slots);
+        if (colors.Count == 0)
+            return Finish(Array.Empty<ushort>(), reserveBlack, colors);
 
+        if (colors.Count <= free)
+        {
+            ushort[] exact = colors.Select(c => c.Value).ToArray();
+            Array.Sort(exact);
+            return Finish(exact, reserveBlack, colors);
+        }
+
+        Centroids start = MedianCut(colors, free, reserveBlack);
+        Palette fresh = Refine(colors, start, reserveBlack);
+        if (previous is null)
+            return fresh;
+
+        float kept = ErrorOf(previous.Entries, previous.Count, colors);
+        if (kept <= fresh.Error * SeedMargin)
+            return Adopt(previous, kept);
+
+        Centroids seeded = Seed(previous, start, reserveBlack);
+        Palette fromSeed = Refine(colors, seeded, reserveBlack);
+        if (fromSeed.Error <= fresh.Error * SeedMargin)
+            return fromSeed;
+        return fresh;
+    }
+
+    static Palette Adopt(Palette previous, float error)
+    {
+        var entries = new ushort[PictureContract.PaletteColors];
+        previous.Entries.CopyTo(entries, 0);
+        var lut = new byte[previous.Lut.Length];
+        previous.Lut.CopyTo(lut, 0);
+        return new Palette(entries, previous.Count, lut, error);
+    }
+
+    static Palette Finish(ushort[] chosen, bool reserveBlack, List<Bin> colors)
+    {
         var entries = new ushort[PictureContract.PaletteColors];
         int count;
         if (reserveBlack)
@@ -75,73 +130,270 @@ static class Quantizer
             count = 1;
         }
 
-        return new Palette(entries, count, BuildLut(entries, count));
+        return new Palette(entries, count, BuildLut(entries, count), ErrorOf(entries, count, colors));
     }
 
-    static ushort[] MedianCut(List<Bin> colors, int slots)
+    static Centroids MedianCut(List<Bin> colors, int free, bool reserveBlack)
     {
         var boxes = new List<Box> { Box.Create(colors) };
-        while (boxes.Count < slots)
+        while (boxes.Count < free)
         {
             int best = -1;
-            int bestScore = 0;
+            float bestError = 0;
             for (int i = 0; i < boxes.Count; i++)
             {
-                int score = boxes[i].SplitScore();
-                if (score > bestScore)
+                float error = boxes[i].Error;
+                if (error > bestError)
                 {
-                    bestScore = score;
+                    bestError = error;
                     best = i;
                 }
             }
 
             if (best < 0)
                 break;
+            if (!boxes[best].TrySplit(out Box? left, out Box? right) || left is null || right is null)
+            {
+                boxes[best].Freeze();
+                continue;
+            }
 
-            (Box left, Box right) = boxes[best].Split();
             boxes[best] = left;
             boxes.Add(right);
         }
 
-        var used = new HashSet<ushort>();
-        var result = new List<ushort>(boxes.Count);
-        foreach (Box box in boxes)
+        int offset = reserveBlack ? 1 : 0;
+        int n = offset + boxes.Count;
+        var l = new float[n];
+        var a = new float[n];
+        var b = new float[n];
+        var pinned = new bool[n];
+        if (reserveBlack)
         {
-            if (box.Representative(used) is not ushort color)
-                continue;
-            if (used.Add(color))
-                result.Add(color);
+            ColorSpace.Oklab(0, out l[0], out a[0], out b[0]);
+            pinned[0] = true;
         }
 
-        result.Sort();
-        return result.ToArray();
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            boxes[i].Mean(out l[offset + i], out a[offset + i], out b[offset + i]);
+        }
+
+        return new Centroids(l, a, b, pinned);
+    }
+
+    static Centroids Seed(Palette previous, Centroids start, bool reserveBlack)
+    {
+        int cap = PictureContract.PaletteColors;
+        var l = new List<float>(cap);
+        var a = new List<float>(cap);
+        var b = new List<float>(cap);
+        var pinned = new List<bool>(cap);
+        if (reserveBlack)
+        {
+            ColorSpace.Oklab(0, out float bl, out float ba, out float bb);
+            l.Add(bl);
+            a.Add(ba);
+            b.Add(bb);
+            pinned.Add(true);
+        }
+
+        for (int i = 0; i < previous.Count && l.Count < cap; i++)
+        {
+            ushort color = previous.Entries[i];
+            if (reserveBlack && color == 0)
+                continue;
+            ColorSpace.Oklab(color, out float cl, out float ca, out float cb);
+            l.Add(cl);
+            a.Add(ca);
+            b.Add(cb);
+            pinned.Add(false);
+        }
+
+        for (int i = 0; i < start.L.Length && l.Count < cap; i++)
+        {
+            if (start.Pinned[i])
+                continue;
+            l.Add(start.L[i]);
+            a.Add(start.A[i]);
+            b.Add(start.B[i]);
+            pinned.Add(false);
+        }
+
+        return new Centroids(l.ToArray(), a.ToArray(), b.ToArray(), pinned.ToArray());
+    }
+
+    static Palette Refine(List<Bin> colors, Centroids seed, bool reserveBlack)
+    {
+        float[] l = (float[])seed.L.Clone();
+        float[] a = (float[])seed.A.Clone();
+        float[] b = (float[])seed.B.Clone();
+        bool[] pinned = seed.Pinned;
+        int n = l.Length;
+        var assign = new int[colors.Count];
+        var binError = new float[colors.Count];
+        var sumL = new double[n];
+        var sumA = new double[n];
+        var sumB = new double[n];
+        var weight = new long[n];
+
+        for (int pass = 0; pass < Passes; pass++)
+        {
+            Assign(colors, l, a, b, assign, binError);
+            Array.Clear(sumL);
+            Array.Clear(sumA);
+            Array.Clear(sumB);
+            Array.Clear(weight);
+            for (int i = 0; i < colors.Count; i++)
+            {
+                int slot = assign[i];
+                Bin color = colors[i];
+                sumL[slot] += color.L * color.Count;
+                sumA[slot] += color.A * color.Count;
+                sumB[slot] += color.B * color.Count;
+                weight[slot] += color.Count;
+            }
+
+            var taken = new bool[colors.Count];
+            for (int slot = 0; slot < n; slot++)
+            {
+                if (pinned[slot])
+                    continue;
+                if (weight[slot] > 0)
+                {
+                    l[slot] = (float)(sumL[slot] / weight[slot]);
+                    a[slot] = (float)(sumA[slot] / weight[slot]);
+                    b[slot] = (float)(sumB[slot] / weight[slot]);
+                    continue;
+                }
+
+                int worst = WorstBin(binError, taken);
+                if (worst < 0)
+                    continue;
+                taken[worst] = true;
+                l[slot] = colors[worst].L;
+                a[slot] = colors[worst].A;
+                b[slot] = colors[worst].B;
+            }
+        }
+
+        Assign(colors, l, a, b, assign, binError);
+        ushort[] chosen = Snap(colors, l, a, b, pinned, assign);
+        return Finish(chosen, reserveBlack, colors);
+    }
+
+    static void Assign(List<Bin> colors, float[] l, float[] a, float[] b, int[] assign, float[] binError)
+    {
+        int n = l.Length;
+        for (int i = 0; i < colors.Count; i++)
+        {
+            Bin color = colors[i];
+            int best = 0;
+            float bestDist = float.MaxValue;
+            for (int slot = 0; slot < n; slot++)
+            {
+                float dist = ColorSpace.DistanceTo(l[slot], a[slot], b[slot], color.Value);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = slot;
+                    if (dist == 0)
+                        break;
+                }
+            }
+
+            assign[i] = best;
+            binError[i] = bestDist * color.Count;
+        }
+    }
+
+    static int WorstBin(float[] binError, bool[] taken)
+    {
+        int worst = -1;
+        float worstScore = -1;
+        for (int i = 0; i < binError.Length; i++)
+        {
+            if (taken[i] || binError[i] <= worstScore)
+                continue;
+            worstScore = binError[i];
+            worst = i;
+        }
+
+        return worst;
+    }
+
+    static ushort[] Snap(List<Bin> colors, float[] l, float[] a, float[] b, bool[] pinned, int[] assign)
+    {
+        var used = new HashSet<ushort>();
+        var picked = new List<ushort>();
+        for (int slot = 0; slot < l.Length; slot++)
+        {
+            if (pinned[slot])
+                continue;
+            int best = -1;
+            float bestDist = float.MaxValue;
+            for (int i = 0; i < colors.Count; i++)
+            {
+                if (assign[i] != slot)
+                    continue;
+                float dist = ColorSpace.DistanceTo(l[slot], a[slot], b[slot], colors[i].Value);
+                if (dist < bestDist || (dist == bestDist && (best < 0 || colors[i].Value < colors[best].Value)))
+                {
+                    bestDist = dist;
+                    best = i;
+                }
+            }
+
+            if (best < 0)
+                continue;
+            if (used.Add(colors[best].Value))
+                picked.Add(colors[best].Value);
+        }
+
+        picked.Sort();
+        return picked.ToArray();
+    }
+
+    static float ErrorOf(ushort[] entries, int count, List<Bin> colors)
+    {
+        double sse = 0;
+        foreach (Bin color in colors)
+        {
+            float best = float.MaxValue;
+            for (int i = 0; i < count; i++)
+            {
+                float dist = ColorSpace.Distance(color.Value, entries[i]);
+                if (dist < best)
+                {
+                    best = dist;
+                    if (dist == 0)
+                        break;
+                }
+            }
+
+            if (best < float.MaxValue)
+                sse += best * color.Count;
+        }
+
+        return sse <= 0 ? 0 : (float)sse;
     }
 
     static byte[] BuildLut(ushort[] entries, int count)
     {
         var lut = new byte[65536];
-        var red = new int[count];
-        var green = new int[count];
-        var blue = new int[count];
+        var l = new float[count];
+        var a = new float[count];
+        var b = new float[count];
         for (int i = 0; i < count; i++)
-        {
-            Rgb565.Unpack(entries[i], out byte r, out byte g, out byte b);
-            red[i] = r;
-            green[i] = g;
-            blue[i] = b;
-        }
+            ColorSpace.Oklab(entries[i], out l[i], out a[i], out b[i]);
 
         for (int color = 0; color < 65536; color++)
         {
-            Rgb565.Unpack((ushort)color, out byte r, out byte g, out byte b);
             int best = 0;
-            int bestDist = int.MaxValue;
+            float bestDist = float.MaxValue;
             for (int i = 0; i < count; i++)
             {
-                int dr = r - red[i];
-                int dg = g - green[i];
-                int db = b - blue[i];
-                int dist = (2 * dr * dr) + (4 * dg * dg) + (3 * db * db);
+                float dist = ColorSpace.DistanceTo(l[i], a[i], b[i], color);
                 if (dist < bestDist)
                 {
                     bestDist = dist;
@@ -157,6 +409,25 @@ static class Quantizer
         return lut;
     }
 
+    readonly struct Centroids
+    {
+        public Centroids(float[] l, float[] a, float[] b, bool[] pinned)
+        {
+            L = l;
+            A = a;
+            B = b;
+            Pinned = pinned;
+        }
+
+        public float[] L { get; }
+
+        public float[] A { get; }
+
+        public float[] B { get; }
+
+        public bool[] Pinned { get; }
+    }
+
     sealed class Box
     {
         Box(List<Bin> colors)
@@ -164,117 +435,142 @@ static class Quantizer
             Colors = colors;
             foreach (Bin color in colors)
             {
-                int r = Rgb565.ChannelR(color.Value);
-                int g = Rgb565.ChannelG(color.Value);
-                int b = Rgb565.ChannelB(color.Value);
-                RMin = Math.Min(RMin, r);
-                RMax = Math.Max(RMax, r);
-                GMin = Math.Min(GMin, g);
-                GMax = Math.Max(GMax, g);
-                BMin = Math.Min(BMin, b);
-                BMax = Math.Max(BMax, b);
+                double n = color.Count;
+                SumL += color.L * n;
+                SumA += color.A * n;
+                SumB += color.B * n;
+                SumLL += color.L * color.L * n;
+                SumAA += color.A * color.A * n;
+                SumBB += color.B * color.B * n;
                 Pop += color.Count;
             }
         }
 
         public List<Bin> Colors { get; }
 
-        public int RMin { get; private set; } = 31;
+        public double SumL { get; }
 
-        public int RMax { get; private set; }
+        public double SumA { get; }
 
-        public int GMin { get; private set; } = 63;
+        public double SumB { get; }
 
-        public int GMax { get; private set; }
+        public double SumLL { get; }
 
-        public int BMin { get; private set; } = 31;
+        public double SumAA { get; }
 
-        public int BMax { get; private set; }
+        public double SumBB { get; }
 
-        public long Pop { get; private set; }
+        public long Pop { get; }
 
-        public static Box Create(List<Bin> colors) => new(colors);
+        public float Error { get; private set; }
 
-        public int SplitScore()
+        public static Box Create(List<Bin> colors)
         {
-            if (Colors.Count < 2)
-                return 0;
-            int r = (RMax - RMin) * 8;
-            int g = (GMax - GMin) * 4;
-            int b = (BMax - BMin) * 8;
-            return Math.Max(r, Math.Max(g, b));
+            var box = new Box(colors);
+            box.Error = box.Spread();
+            return box;
         }
 
-        public (Box Left, Box Right) Split()
+        public void Freeze() => Error = 0;
+
+        public void Mean(out float l, out float a, out float b)
         {
-            int r = (RMax - RMin) * 8;
-            int g = (GMax - GMin) * 4;
-            int b = (BMax - BMin) * 8;
-            int channel = 1;
-            int best = g;
-            if (r > best)
+            if (Pop <= 0)
             {
-                channel = 0;
-                best = r;
+                l = 0;
+                a = 0;
+                b = 0;
+                return;
             }
 
-            if (b > best)
+            l = (float)(SumL / Pop);
+            a = (float)(SumA / Pop);
+            b = (float)(SumB / Pop);
+        }
+
+        public bool TrySplit(out Box? left, out Box? right)
+        {
+            left = null;
+            right = null;
+            if (Colors.Count < 2 || Pop < 2)
+                return false;
+
+            double varL = Variance(SumL, SumLL);
+            double varA = Variance(SumA, SumAA);
+            double varB = Variance(SumB, SumBB);
+            int channel = 1;
+            double best = varA;
+            if (varL > best)
+            {
+                channel = 0;
+                best = varL;
+            }
+
+            if (varB > best)
                 channel = 2;
+            if (best <= 0)
+                return false;
 
             List<Bin> sorted = channel switch
             {
-                0 => Colors.OrderBy(c => Rgb565.ChannelR(c.Value)).ThenBy(c => c.Value).ToList(),
-                2 => Colors.OrderBy(c => Rgb565.ChannelB(c.Value)).ThenBy(c => c.Value).ToList(),
-                _ => Colors.OrderBy(c => Rgb565.ChannelG(c.Value)).ThenBy(c => c.Value).ToList(),
+                0 => Colors.OrderBy(c => c.L).ThenBy(c => c.Value).ToList(),
+                2 => Colors.OrderBy(c => c.B).ThenBy(c => c.Value).ToList(),
+                _ => Colors.OrderBy(c => c.A).ThenBy(c => c.Value).ToList(),
             };
 
-            long half = Pop / 2;
-            long acc = 0;
-            int splitAt = 1;
+            double accL = 0;
+            double accA = 0;
+            double accB = 0;
+            double accLL = 0;
+            double accAA = 0;
+            double accBB = 0;
+            long accN = 0;
+            double bestSplit = double.MaxValue;
+            int splitAt = -1;
             for (int i = 0; i < sorted.Count - 1; i++)
             {
-                acc += sorted[i].Count;
-                splitAt = i + 1;
-                if (acc >= half)
-                    break;
-            }
-
-            return (new Box(sorted.GetRange(0, splitAt)), new Box(sorted.GetRange(splitAt, sorted.Count - splitAt)));
-        }
-
-        public ushort? Representative(HashSet<ushort> used)
-        {
-            long r = 0;
-            long g = 0;
-            long b = 0;
-            long n = 0;
-            foreach (Bin color in Colors)
-            {
-                Rgb565.Unpack(color.Value, out byte cr, out byte cg, out byte cb);
-                r += (long)cr * color.Count;
-                g += (long)cg * color.Count;
-                b += (long)cb * color.Count;
-                n += color.Count;
-            }
-
-            ushort mean = Rgb565.Pack((byte)(r / n), (byte)(g / n), (byte)(b / n));
-            ushort best = 0;
-            int bestDist = int.MaxValue;
-            bool found = false;
-            foreach (Bin color in Colors)
-            {
-                if (used.Contains(color.Value))
+                Bin color = sorted[i];
+                double n = color.Count;
+                accL += color.L * n;
+                accA += color.A * n;
+                accB += color.B * n;
+                accLL += color.L * color.L * n;
+                accAA += color.A * color.A * n;
+                accBB += color.B * color.B * n;
+                accN += color.Count;
+                long rightN = Pop - accN;
+                if (accN == 0 || rightN == 0)
                     continue;
-                int dist = Rgb565.Distance(mean, color.Value);
-                if (dist < bestDist)
+                double split = Spread(accL, accA, accB, accLL, accAA, accBB, accN)
+                    + Spread(SumL - accL, SumA - accA, SumB - accB, SumLL - accLL, SumAA - accAA, SumBB - accBB, rightN);
+                if (split < bestSplit)
                 {
-                    bestDist = dist;
-                    best = color.Value;
-                    found = true;
+                    bestSplit = split;
+                    splitAt = i + 1;
                 }
             }
 
-            return found ? best : null;
+            if (splitAt <= 0 || splitAt >= sorted.Count)
+                return false;
+
+            left = Create(sorted.GetRange(0, splitAt));
+            right = Create(sorted.GetRange(splitAt, sorted.Count - splitAt));
+            return true;
+        }
+
+        float Spread() => (float)Spread(SumL, SumA, SumB, SumLL, SumAA, SumBB, Pop);
+
+        double Variance(double sum, double sumSq) => Spread(sum, 0, 0, sumSq, 0, 0, Pop);
+
+        static double Spread(double sumL, double sumA, double sumB, double sumLL, double sumAA, double sumBB, long pop)
+        {
+            if (pop <= 0)
+                return 0;
+            double inv = 1.0 / pop;
+            double error = (sumLL - (sumL * sumL * inv))
+                + (sumAA - (sumA * sumA * inv))
+                + (sumBB - (sumB * sumB * inv));
+            return error <= 1e-12 ? 0 : error;
         }
     }
 }

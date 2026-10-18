@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "ring.h"
 #include "state.h"
 
 /* O draw_bitmap enfileira o DMA e o próximo envio espera a fila. Essa espera travava o present. */
@@ -34,6 +35,7 @@ static int s_started;
 static int64_t s_last_wall;
 static uint32_t s_shown;
 static int s_have_shown;
+static int s_filling;
 static int s_fps_shown;
 static int s_fps_value;
 static int s_fps_draw;
@@ -245,6 +247,41 @@ static void paint_link(int show)
     }
 }
 
+/* [buffer_goal] Bodies para soltar o relógio. 3 s, entre 24 e 72 quadros. */
+static int buffer_goal(void)
+{
+    uint32_t frame_us = atomic_load(&g.frame_us);
+    if (frame_us < 16667 || frame_us > 1000000) {
+        frame_us = 41667;
+    }
+    int frames = (int)(3000000u / frame_us);
+    if (frames < 24) {
+        frames = 24;
+    }
+    if (frames > 72) {
+        frames = 72;
+    }
+    return frames;
+}
+
+/* [buffer_low] Abaixo disto o relógio para e espera o buffer_goal de novo. */
+static int buffer_low(void)
+{
+    return 8;
+}
+
+/* [buffered_frames] Fila do ring mais os slots que o decode já publicou. */
+static int buffered_frames(void)
+{
+    int ready = 0;
+    for (int i = 0; i < 2; i++) {
+        if (atomic_load(&g_slot[i].ready)) {
+            ready++;
+        }
+    }
+    return ready + (int)ring_queued();
+}
+
 static void note_fps(void)
 {
     s_fps_shown++;
@@ -348,6 +385,7 @@ void present_reset(void)
     s_epoch = atomic_load(&g.epoch);
     s_started = 0;
     s_have_shown = 0;
+    s_filling = 1;
     s_shown = 0;
     s_fps_shown = 0;
     s_fps_value = 0;
@@ -393,6 +431,39 @@ void present_task(void *arg)
 
         if (!atomic_load(&g.have_ip)) {
             hold_link();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        int depth = buffered_frames();
+        if (s_filling) {
+            if (depth < buffer_goal()) {
+                if (s_started) {
+                    clock_stop(1);
+                }
+                if (depth == 0 && s_have_shown) {
+                    if (s_stall_at == 0) {
+                        s_stall_at = esp_timer_get_time();
+                    }
+                    if (esp_timer_get_time() - s_stall_at >= 300000) {
+                        hold_link();
+                    }
+                } else {
+                    s_stall_at = 0;
+                    if (s_held) {
+                        release_link();
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            s_filling = 0;
+            s_stall_at = 0;
+        } else if (depth < buffer_low()) {
+            s_filling = 1;
+            if (s_started) {
+                clock_stop(1);
+            }
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }

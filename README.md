@@ -47,7 +47,7 @@ No VLC, Arquivo > Abrir, ou `vlc --demux w154 video.w154`.
 
 A API lê uma pasta de `.w154` e empurra o arquivo escolhido para o painel. O conceito está em [docs/api-w154.md](docs/api-w154.md). O player do device está em [docs/firmware-w154.md](docs/firmware-w154.md).
 
-`build.bat` gera os dois Release. `build.bat --api` gera só a API. `w154stream.bat` abre outra console, publica o `WIFI_SSID` de `wifi_secrets.h` num hotspot 2.4 GHz com uma senha UUID nova e sobe o exe Release. A console de origem volta na hora. Com esse hotspot no ar, `flash.bat` grava no firmware o SSID, essa senha e o gateway dessa instância.
+`build.bat` gera os dois Release. `build.bat --api` gera só a API. `w154stream.bat` abre outra console, encerra um `w154stream` que já esteja aberto, publica o `WIFI_SSID` de `wifi_secrets.h` num hotspot 2.4 GHz com uma senha UUID nova e sobe o exe Release. A console de origem volta na hora. Com esse hotspot no ar, `flash.bat` grava no firmware o SSID, essa senha e o gateway dessa instância.
 
 ```text
 build.bat
@@ -57,4 +57,10 @@ dotnet run --project W154Stream -- --selftest
 flash.bat
 ```
 
-`POST http://localhost:5090/play` com `{ "name": "clip.w154" }` começa o envio. O `flash` seguinte leva o Wi-Fi do hotspot que está no ar.
+A console do `w154stream.bat` sobe elevada em `C:\WINDOWS\system32`. Sem `--dir`, a pasta listada é essa. `POST http://localhost:5090/play` com `{ "name": "clip.w154" }` começa o envio e repete o arquivo. `name` também pode ser o caminho absoluto de um `.w154` em qualquer pasta, e esse caminho não depende de `--dir`.
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5090/play -ContentType "application/json" -Body '{"name":"F:\\clips\\clip.w154"}'
+```
+
+O `flash` seguinte leva o Wi-Fi do hotspot que está no ar. Uma senha nova só entra no painel depois desse flash. Light sleep apaga a porta USB; o PWR traz o chip de volta.

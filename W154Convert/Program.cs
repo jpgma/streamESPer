@@ -36,7 +36,7 @@ static class Program
         string output = Ask("Saída (.w154)", outputDefault);
         int fps = AskInt("fps", OptionalInt(args, "--fps") ?? 24);
         FitMode fit = AskFit(OptionalFlag(args, "--fit"));
-        bool dither = AskYes("Dither (s/N)", HasFlag(args, "--dither"));
+        DitherMode dither = AskDither(OptionalDither(args) ?? DitherMode.None);
         bool includeAudio = AskYes("Incluir áudio (S/n)", !HasFlag(args, "--no-audio"));
         int sampleRate = OptionalInt(args, "--sample-rate") ?? AudioPcm.DefaultSampleRate;
         if (includeAudio)
@@ -51,7 +51,7 @@ static class Program
         int fps = OptionalInt(args, "--fps") ?? 24;
         FitMode fit = ParseFit(OptionalFlag(args, "--fit") ?? "cover");
         int sampleRate = OptionalInt(args, "--sample-rate") ?? AudioPcm.DefaultSampleRate;
-        return Build(input, output, fps, fit, HasFlag(args, "--dither"), HasFlag(args, "--allow-over-budget"), sampleRate, !HasFlag(args, "--no-audio"));
+        return Build(input, output, fps, fit, OptionalDither(args) ?? DitherMode.None, HasFlag(args, "--allow-over-budget"), sampleRate, !HasFlag(args, "--no-audio"));
     }
 
     static void RejectUnknown(string[] args)
@@ -67,15 +67,21 @@ static class Program
             string name = FlagName(args[i]);
             if (!known.Contains(name))
                 throw new W154Exception($"argumento desconhecido: {args[i]}");
-            if (name is "--dither" or "--allow-over-budget" or "--no-audio" || args[i].Contains('='))
+            if (name is "--allow-over-budget" or "--no-audio" || args[i].Contains('='))
                 continue;
+            if (name == "--dither")
+            {
+                if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                    i++;
+                continue;
+            }
             if (FlagValue(args, i) is null)
                 throw new W154Exception($"falta o valor de {name}.");
             i++;
         }
     }
 
-    static ConvertRequest Build(string input, string output, int fps, FitMode fit, bool dither, bool allowOverBudget, int sampleRate, bool includeAudio)
+    static ConvertRequest Build(string input, string output, int fps, FitMode fit, DitherMode dither, bool allowOverBudget, int sampleRate, bool includeAudio)
     {
         input = Unquote(input);
         output = Unquote(output);
@@ -155,6 +161,34 @@ static class Program
         }
     }
 
+    static DitherMode AskDither(DitherMode current)
+    {
+        while (true)
+        {
+            string text = Ask("Dither (none/ordered/fs)", DitherModeParser.Name(current));
+            if (DitherModeParser.TryParse(text, out DitherMode mode))
+                return mode;
+            Console.Error.WriteLine("use none, ordered ou fs.");
+        }
+    }
+
+    static DitherMode? OptionalDither(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            if (FlagName(args[i]) != "--dither")
+                continue;
+            string? text = FlagValue(args, i);
+            if (text is null)
+                return DitherMode.Fs;
+            if (!DitherModeParser.TryParse(text, out DitherMode mode))
+                throw new W154Exception("dither deve ser none, ordered ou fs.");
+            return mode;
+        }
+
+        return null;
+    }
+
     static bool AskYes(string label, bool current)
     {
         string text = Ask(label, current ? "s" : "n");
@@ -180,12 +214,13 @@ static class Program
 
             w154
             w154 --input video.mp4 --output video.w154 --fps 24 --fit cover
-            w154 --input video.mp4 --fit contain --dither --allow-over-budget
+            w154 --input video.mp4 --dither ordered
+            w154 --input video.mp4 --fit contain --dither fs --allow-over-budget
             w154 --input video.mp4 --sample-rate 16000 --no-audio
             w154 selftest
 
             --fps                  inteiro de 1 a 60 (padrão 24)
-            --dither               Floyd-Steinberg (padrão desligado)
+            --dither               none, ordered ou fs (padrão none). Sozinho, fs
             --sample-rate          16000, 24000 ou 48000 (padrão 48000), mono s16le
             --no-audio             não grava PCM, mesmo se a origem tiver áudio
             --allow-over-budget    sai 0 mesmo se o pior segundo passar de 16 Mbit/s
@@ -243,8 +278,14 @@ static class Program
         if (eq >= 0)
             return arg[(eq + 1)..];
         string name = FlagName(arg);
-        if (name is "--dither" or "--allow-over-budget" or "--no-audio")
+        if (name is "--allow-over-budget" or "--no-audio")
             return "true";
+        if (name == "--dither")
+        {
+            if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+                return null;
+            return args[index + 1];
+        }
         if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
             return null;
         return args[index + 1];

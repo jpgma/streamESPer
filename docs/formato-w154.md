@@ -382,7 +382,7 @@ Recusar o arquivo no primeiro item que falhar:
 
 Um buraco de `frame_index` no transporte descarta deltas até chegar um keyframe. A última imagem apresentada permanece.
 
-O PCM toca no ES8311, no mesmo relógio: a amostra `i` está em `(i * 1000000) / sample_rate` microssegundos, e o quadro `n` em `n * frame_us`. Cerca de 20–40 ms de folga entre os dois basta para este alto-falante. O core 0 recebe o Wi-Fi e alimenta o I2S. O core 1 expande e faz o SPI, e não espera socket. O ring de I2S fica na DRAM interna, dezenas de ms (buffer de 50–100 ms), não segundos. O PA do GPIO7 fica alto só enquanto há áudio, e sobe cerca de 35 ms antes da primeira amostra. ES7210 e AEC duplex ficam de fora. Um quadro de vídeo pode cair. Num buraco de áudio, o player repete ou esmaece a última amostra em vez de travar o present.
+O PCM toca no ES8311, no mesmo relógio: a amostra `i` está em `(i * 1000000) / sample_rate` microssegundos, e o quadro `n` em `n * frame_us`. O host segura cerca de 350 ms de PCM à frente de `play_frame`. O device ignora `time_us` e enfileira por `seq`. O ring de I2S fica na DRAM interna, 400 ms a 48 kHz. Vinte a quarenta milissegundos não cobrem o jitter deste enlace: o underrun de vídeo desliga o I2S e o áudio picota. O PA do GPIO7 sobe cerca de 35 ms antes da primeira amostra e desce no pause, no reset, sem IP, com o backlight apagado ou na marca de desconexão. Num underrun curto o PA fica. ES7210 e AEC duplex ficam de fora. Num buraco de áudio o player repete a última amostra. O restante do player está em [firmware-w154.md](firmware-w154.md).
 
 ## No ar
 
@@ -391,7 +391,7 @@ O arquivo não contém datagramas. Um sender lê os bodies em ordem e fatia cada
 | Offset | Tipo | Campo |
 | ---: | --- | --- |
 | 0 | u32 | `seq`. Sobe 1 a cada datagrama, inclusive de um quadro para o outro |
-| 4 | u32 | `frame_index`. Índice do quadro no arquivo, desde 0 |
+| 4 | u32 | `frame_index`. Índice da sessão, crescente. O body é o do arquivo em `frame_index % frame_count` |
 | 8 | u16 | `frag_index`. 0 .. `frag_count - 1` |
 | 10 | u16 | `frag_count` |
 | 12 | u16 | `payload_bytes`. 1..1456 |
@@ -403,7 +403,7 @@ frag_count    = ceil(body_bytes / 1456)
 payload       = até 1456 bytes do body, em ordem, sem o u32 body_bytes
 ```
 
-`seq` fica no offset 0 para um contador no estilo de um flood UDP enxergar o buraco. Fragmento faltando derruba o quadro inteiro. `frame_index` mais velho que o último apresentado chega tarde e é descartado. O loop de present não espera um buraco fechar. Não há type byte na frente desse datagrama.
+`seq` fica no offset 0 para um contador no estilo de um flood UDP enxergar o buraco. Fragmento faltando derruba o quadro inteiro. `frame_index` mais velho que o último apresentado chega tarde e é descartado. O present só mostra `shown + 1` (ou um quadro mais novo, contando o salto). Por isso o índice no fio não volta a 0 no fim do arquivo: a sessão continua, e o body lido é `frame_index % frame_count`. O quadro 0 do arquivo é keyframe, então a emenda decodifica quando o índice da sessão bate com `shown + 1`. O loop de present não espera um buraco fechar. Não há type byte na frente desse datagrama.
 
 O PCM não entra nesses datagramas. Ele sai noutro socket UDP, com a própria sequência. Um datagrama de áudio também tem no máximo 1472 bytes:
 

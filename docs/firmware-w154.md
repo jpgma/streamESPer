@@ -44,15 +44,17 @@ Carve único no boot. Nada de `malloc` no caminho do `frame`.
 
 Fila vazia anuncia a capacidade inteira. O próximo body recomeça no offset 0, então o resto no fim do buffer não é espaço livre. Anunciar só esse resto (na casa de 1400 bytes) faz o host parar para sempre. Descontar do crédito os bytes que ainda faltam no parcial tem o mesmo efeito: o credit chegou a 252 bytes com o quadro pela metade, o host não mandou o fragmento seguinte e a imagem congelou. Se a cauda não cabe o resto, o parcial é descartado e o quadro vira salto.
 
-O socket de vídeo usa `SO_RCVBUF` de 32 KiB. A API não deixa mais de 20 datagramas de 1456 (~29 KiB) no ar. Rajada maior perde UDP, o `expect_seq` fura e o device trata como perda.
+O socket de vídeo usa `SO_RCVBUF` de 32 KiB. A API não deixa mais de 20 datagramas de 1456 (~29 KiB) no ar. Rajada maior perde UDP, o `expect_seq` fura e o device trata como perda. Aumentar essa janela não enche o ring: o que falta é crédito logo depois da rajada, no máximo a cada 10 ms. O socket de áudio tem o mesmo 32 KiB. 350 ms a 48 kHz mono s16 são cerca de 33 KiB; uma rajada só estoura o buffer e o fill nasce baixo. O host manda no máximo 8 datagramas de áudio por volta.
+
+`begin_slot` reserva `frag_count * 1456` contíguos ao abrir o body. O último fragmento quase nunca enche 1456, então a reserva passa dos bytes reais. Sem esse espaço o pacote é recusado, `skip_key` liga e os deltas caem até o próximo keyframe. O log é `video seq N esperava N`: o `seq` batia com `expect_seq`, o slot é que não abriu. Um buraco de UDP mostra dois números diferentes. O salto na imagem fica na casa de um GOP e o `pic fps` continua perto de 24, porque o relógio avança até o keyframe que sobrou. A tabela tem 512 entradas; neste painel o byte cap de 7953020 limita a fila a cerca de 170 bodies.
 
 ## Relógio
 
-`t0` é o instante em que o primeiro keyframe fica pronto. O `frame` `n` é devido em `n * frame_us`. Não há espera para encher a PSRAM.
+`t0` é o instante em que o relógio solta, não o do primeiro keyframe. O present espera cerca de 3 s de bodies (entre 24 e 72 quadros) antes de mostrar o primeiro. Essa conta é `ring_queued` mais os dois slots que o decode já publicou. `ring_diag` zera o contador de salto e não serve aqui. Os dois slots não são o preroll: o decode esvazia o ring assim que um slot libera, então a folga tem de ficar na PSRAM. O `frame` `n` é devido em `n * frame_us`. Se a fila cai abaixo de 8 quadros, o relógio para e só volta quando os 3 s enchem de novo. O `media_us` fica congelado, então a volta não adianta os quadros que já eram devidos. Enquanto chega dado, essa espera não abre a tela de enlace. A tela de enlace continua só quando a fila fica em 0 por 300 ms, ou quando não há IP.
 
-Underrun: o próximo body ainda não está no ring e não houve buraco de `seq`. O relógio do vídeo pausa, o bit 30 do credit sobe, e o `rx` continua. O canal I2S é desligado nesse instante. O DMA são 8 blocos de 480 amostras, cerca de 80 ms a 48 kHz; se ele seguir, a imagem parada ainda soa. O PA fica ligado nesse buraco curto. Quando o body chega, o relógio volta, salvo pause do operador.
+Underrun: o próximo body ainda não está no ring e não houve buraco de `seq`. O relógio do vídeo pausa, o bit 30 do credit sobe, e o `rx` continua. O canal I2S é desligado nesse instante. O DMA são 8 blocos de 480 amostras, cerca de 80 ms a 48 kHz; se ele seguir, a imagem parada ainda soa. O PA fica ligado nesse buraco curto. Quando a fila volta ao patamar de 3 s, o relógio retoma de onde parou, salvo pause do operador.
 
-`play_frame` só avança quando um quadro é mostrado. Num arquivo de cerca de 2,2 GiB, 24 fps e PCM 48 kHz, o present segura 24–25 fps com `gap` 0 e atraso em geral abaixo de 1 ms. O `free_bytes` desce a algumas centenas de KiB e volta para cerca de 6–7 MB quando o ring esvazia. A capacidade anunciada nesse painel é 7953020 bytes. O fill de áudio oscila dezenas de ms sem derrubar o quadro. `vTaskDelay(1)` neste tick de 100 Hz dura cerca de 10 ms; espera menor que isso no present é spin.
+`play_frame` só avança quando um quadro é mostrado. Com o crédito em dia, um arquivo a 24 fps e PCM 48 kHz segura `pic fps` 24, `gap` 0, `late` abaixo de 1 ms e `aud fill` perto de 350 ms com `underrun` 0. O ring permanece cheio enquanto o enlace aguenta o realtime; `free_bytes` fica baixo de propósito. `rx slots 0` com o arquivo armado é fila vazia, não steady state. `vTaskDelay(1)` neste tick de 100 Hz dura cerca de 10 ms; espera menor que isso no present é spin.
 
 Perda: `seq` furou. O `frame` em montagem é descartado, e os deltas seguintes também, até um body com o bit de keyframe. A última imagem fica no painel.
 
@@ -72,7 +74,7 @@ As duas primeiras bands levam o número de fps no canto superior direito, só os
 
 Sem IP, ou sem o próximo quadro por mais de 300 ms, o relógio para, o PA desce e o quadro deixa de ir ao painel. A tela fica preta e um círculo cortado pisca no centro, meio segundo aceso e meio apagado, para não gravar uma imagem parada. O I2S para no mesmo instante, para não sobrar áudio no DMA. Ao voltar o quadro, a tela inteira é redesenhada.
 
-O botão PWR (GPIO5) faz o fade do backlight no GPIO46, 420 ms entre aceso e apagado. Com o vidro apagado o relógio e o PA param. 30 s depois o rádio desce e o chip entra em light sleep até o PWR baixar de novo. Na volta o painel é reiniciado sem pulsar o RST, o Wi-Fi sobe e o backlight acende.
+O botão PWR (GPIO5) faz o fade do backlight no GPIO46, 420 ms entre aceso e apagado. Com o vidro apagado o relógio e o PA param. 30 s depois o rádio desce e o chip entra em light sleep até o PWR baixar de novo. O USB-JTAG desce junto. O Windows deixa de ver `VID_303A` e passa a mostrar `Unknown USB Device (Device Descriptor Request Failed)`, VID `0000`. `flash.bat` responde que não há porta Espressif. Isso não é a COM ocupada pelo monitor: não há porta para passar em `-Port`. O PWR acorda o chip. Na volta o painel é reiniciado sem pulsar o RST, o Wi-Fi sobe e o backlight acende.
 
 ## Áudio
 

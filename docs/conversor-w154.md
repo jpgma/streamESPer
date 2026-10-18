@@ -36,11 +36,11 @@ gop = max(1, (1000000 + frame_us / 2) / frame_us)
 
 24 fps grava `frame_us` 41667 e `gop` 24. 30 fps grava 33333 e 30. Há um keyframe por segundo. O quadro `n` é apresentado em `n * frame_us`.
 
-Cada GOP ganha uma palette só. As cores da origem que caem no mesmo RGB565 se fundem. Se ainda houver mais de 256, um median cut reduz até 256 entradas únicas. Os quadros do GOP são mapeados por essa palette, então os índices de um delta continuam comparáveis. Mudança de palette só acontece em keyframe.
+Cada GOP ganha uma palette só. As cores da origem que caem no mesmo RGB565 se fundem. Se ainda houver mais de 256, um median cut em OKLab parte a caixa de maior erro pelo eixo de maior variância, no ponto que menos erra, e quatro passes de k-means afinam os centros. Cada centro volta para a cor RGB565 mais próxima que caiu nele, então as entradas usadas não se repetem. A palette do GOP anterior fica enquanto o erro dela não passa de 10% do corte novo. Passou da margem, outros quatro passes de k-means partem dessas cores; se o erro ainda passar de 10%, vale o corte novo. Um corte de cena costuma cair nesse caso. Os quadros do GOP são mapeados por essa palette, então os índices de um delta continuam comparáveis. Mudança de palette só acontece em keyframe.
 
 Um keyframe traz os bits 0 e 1 de `flags`, `band_count` 30, `band_mask` `0x3FFFFFFF`, a palette e as 30 bands. Um delta não traz palette. O bit `i` fica ligado só quando a band `i` difere do quadro anterior. Um delta sem bands é um quadro parado: o player deixa a GRAM quieta.
 
-Dither (Floyd–Steinberg) fica desligado, a menos que `--dither` seja pedido. Ele suja quase toda band e atrapalha o RLE. O rate check continua valendo.
+`--dither` escolhe o mapeamento. O padrão é `none`: cada pixel vai para a entrada mais próxima em OKLab. `ordered` soma um deslocamento de Bayer 8×8, fixo pela posição, antes da busca. O mesmo quadro gera os mesmos índices, e um trecho parado continua comprimindo. `fs` é Floyd–Steinberg a partir do RGB24, com varredura alternada. Ele segura degradê e suja quase toda band, então o RLE rende menos. `--dither` sem valor é `fs`. O rate check continua valendo.
 
 ## Codecs da band
 
@@ -118,14 +118,15 @@ O arquivo é gravado mesmo acima de 16. Sem `--allow-over-budget`, o processo sa
 
 ## Uso
 
-Sem `--input`, o programa pergunta o arquivo, a saída, o fps, o `fit`, o dither, se o áudio entra e a taxa.
+Sem `--input`, o programa pergunta o arquivo, a saída, o fps, o `fit`, o dither (`none`, `ordered` ou `fs`), se o áudio entra e a taxa.
 
 Num terminal, a conversão mostra uma barra com a porcentagem, os quadros feitos, o tempo decorrido e o tempo restante. A estimativa usa a duração que o ffmpeg lê na origem. Se essa duração não existir, a linha mostra só os quadros e o tempo decorrido.
 
 ```text
 w154
 w154 --input video.mp4 --output video.w154 --fps 24 --fit cover
-w154 --input video.mp4 --fit contain --dither --allow-over-budget
+w154 --input video.mp4 --dither ordered
+w154 --input video.mp4 --fit contain --dither fs --allow-over-budget
 w154 --input video.mp4 --sample-rate 16000 --no-audio
 w154 selftest
 ```

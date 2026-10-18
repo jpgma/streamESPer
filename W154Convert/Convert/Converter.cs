@@ -5,7 +5,7 @@ readonly record struct ConvertRequest(
     string Output,
     int Fps,
     FitMode Fit,
-    bool Dither,
+    DitherMode Dither,
     bool AllowOverBudget,
     int SampleRate,
     bool IncludeAudio);
@@ -21,9 +21,10 @@ static class Converter
         log.WriteLine(
             $"fonte {size.Width}x{size.Height}, {request.Fps} fps, frame_us {frameUs}, gop {gop}, {request.Fit.ToString().ToLowerInvariant()}");
 
-        var gopFrames = new List<ushort[]>(gop);
+        var gopFrames = new List<byte[]>(gop);
         using var draft = new W154Draft();
         byte[]? previous = null;
+        Palette? previousPalette = null;
         int index = 0;
         string? pcmPath = null;
         var progress = new ConvertProgress(log, EstimateFrames(size.DurationSeconds, request.Fps));
@@ -32,8 +33,9 @@ static class Converter
         {
             if (gopFrames.Count == 0)
                 return;
-            Palette palette = Quantizer.Build(gopFrames, request.Fit == FitMode.Contain);
-            foreach (ushort[] frame in gopFrames)
+            Palette palette = Quantizer.Build(gopFrames, request.Fit == FitMode.Contain, previousPalette);
+            previousPalette = palette;
+            foreach (byte[] frame in gopFrames)
             {
                 bool keyframe = index % gop == 0;
                 byte[] indices = IndexMap.Map(frame, palette, request.Dither);
@@ -50,7 +52,7 @@ static class Converter
             progress.Report(0);
             FfmpegDecoder.ReadFrames(ffmpeg, request.Input, request.Fps, size, rgb =>
             {
-                gopFrames.Add(Scaler.ToRgb565(rgb, size.Width, size.Height, request.Fit));
+                gopFrames.Add(Scaler.ToSquareRgb24(rgb, size.Width, size.Height, request.Fit));
                 if (gopFrames.Count == gop)
                     Flush();
                 progress.Report(index + gopFrames.Count);
@@ -128,7 +130,7 @@ static class Converter
         IReadOnlyList<ushort[]> frames,
         int fps,
         bool contain,
-        bool dither,
+        DitherMode dither,
         string output,
         Stream? pcm = null,
         int sampleRate = 0)
@@ -137,13 +139,15 @@ static class Converter
         int gop = PictureContract.Gop(frameUs);
         var bodies = new List<byte[]>();
         byte[]? previous = null;
+        Palette? previousPalette = null;
         for (int offset = 0; offset < frames.Count; offset += gop)
         {
             int count = Math.Min(gop, frames.Count - offset);
-            var slice = new ushort[count][];
+            var slice = new byte[count][];
             for (int i = 0; i < count; i++)
-                slice[i] = frames[offset + i];
-            Palette palette = Quantizer.Build(slice, contain);
+                slice[i] = Expand(frames[offset + i]);
+            Palette palette = Quantizer.Build(slice, contain, previousPalette);
+            previousPalette = palette;
             for (int i = 0; i < count; i++)
             {
                 int index = offset + i;
@@ -156,6 +160,22 @@ static class Converter
         int[] lengths = W154File.Write(output, frameUs, bodies, pcm, sampleRate);
         W154File.Verify(output);
         return lengths;
+    }
+
+    static byte[] Expand(ushort[] frame)
+    {
+        var rgb = new byte[PictureContract.Pixels * 3];
+        int n = Math.Min(frame.Length, PictureContract.Pixels);
+        for (int i = 0; i < n; i++)
+        {
+            ColorSpace.Expand565(frame[i], out byte r, out byte g, out byte b);
+            int p = i * 3;
+            rgb[p] = r;
+            rgb[p + 1] = g;
+            rgb[p + 2] = b;
+        }
+
+        return rgb;
     }
 
     static int? EstimateFrames(double? durationSeconds, int fps)

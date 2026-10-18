@@ -135,6 +135,17 @@ uint32_t ring_capacity(void)
     return s_cap;
 }
 
+uint32_t ring_queued(void)
+{
+    if (!s_mu) {
+        return 0;
+    }
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    uint32_t n = (uint32_t)s_qn;
+    xSemaphoreGive(s_mu);
+    return n;
+}
+
 uint32_t ring_free_bytes(void)
 {
     xSemaphoreTake(s_mu, portMAX_DELAY);

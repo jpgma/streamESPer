@@ -27,7 +27,16 @@ static class Catalog
 
     public static string? Resolve(string dir, string name)
     {
-        if (string.IsNullOrWhiteSpace(name) || name != Path.GetFileName(name))
+        if (string.IsNullOrWhiteSpace(name))
+            return null;
+        if (Path.IsPathFullyQualified(name))
+        {
+            string full = Path.GetFullPath(name);
+            if (!full.EndsWith(".w154", StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+                return null;
+            return full;
+        }
+        if (name != Path.GetFileName(name))
             return null;
         string path = Path.GetFullPath(Path.Combine(dir, name));
         string root = Path.GetFullPath(dir);

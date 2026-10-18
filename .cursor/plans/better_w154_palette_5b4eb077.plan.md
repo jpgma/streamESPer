@@ -4,31 +4,31 @@ overview: Rework palette generation and index mapping in W154Convert. Quantize i
 todos:
   - id: colorspace
     content: Add ColorSpace.cs (Expand565 with bit replication, OKLab 64K table, distance)
-    status: in_progress
+    status: completed
   - id: scaler
     content: Expose Scaler.ToSquareRgb24 and keep ToRgb565 on top of it
-    status: pending
+    status: completed
   - id: quantizer
     content: "Rewrite Quantizer: OKLab error-driven median cut, k-means passes, previous-palette seed with 10% fallback, pinned black, OKLab LUT"
-    status: pending
+    status: completed
   - id: indexmap
     content: IndexMap with DitherMode None/Ordered (Bayer 8x8)/Fs (24-bit source, alternating scan, clamped error)
-    status: pending
+    status: completed
   - id: converter
     content: "Converter: DitherMode enum, rgb24 GOP buffer, carry previous palette, EncodeFrames signature"
-    status: pending
+    status: completed
   - id: cli
     content: "Program: --dither none|ordered|fs (bare = fs), prompt, help text"
-    status: pending
+    status: completed
   - id: selftest
     content: Add selftest checks (OKLab, lossless path, gradient error, ordered empty delta, FS flat, seeding)
-    status: pending
+    status: completed
   - id: docs
     content: Update docs/conversor-w154.md, README if needed, and w154-converter.mdc
-    status: pending
+    status: completed
   - id: verify
     content: Build, run selftest, compare Mbit/s and visuals on a sample clip for each dither mode
-    status: pending
+    status: completed
 isProject: false
 ---
 

@@ -42,8 +42,7 @@ sealed class Pump : IHostedService
     int _videoFrame;
     int _videoOffset;
     uint _audioSeq;
-    int _audioSample;
-    bool _eosSent;
+    long _audioSample;
     long _logAt;
 
     public Pump(string dir, int helloPort)
@@ -75,7 +74,7 @@ sealed class Pump : IHostedService
             if (_movie is not null)
                 _dead.Add(_movie);
             _movie = movie;
-            _name = Path.GetFileName(path);
+            _name = Path.IsPathFullyQualified(name) ? path : Path.GetFileName(path);
             _token++;
             _armed = true;
             _paused = false;
@@ -241,13 +240,6 @@ sealed class Pump : IHostedService
                 Console.WriteLine($"play {playFrame} sent {_videoFrame} free {free} aud {_audioSample} underrun {(_devUnderrun ? 1 : 0)}");
             }
 
-            if (!_eosSent && _videoFrame >= movie.FrameCount && AudioCaughtUp(movie))
-            {
-                SendControl(controlEp, Session.OpEos, token, (uint)movie.FrameCount);
-                _eosSent = true;
-                sent = true;
-            }
-
             lock (_gate)
             {
                 _frameSent = _videoFrame;
@@ -342,13 +334,17 @@ sealed class Pump : IHostedService
     bool SendVideo(W154Movie movie, IPEndPoint ep, ref uint free, ref uint expect)
     {
         bool sent = false;
-        while (_videoFrame < movie.FrameCount)
+        int count = movie.FrameCount;
+        while (count > 0)
         {
-            ReadOnlySpan<byte> body = movie.Body(_videoFrame);
+            ReadOnlySpan<byte> body = movie.Body(_videoFrame % count);
             int fragCount = RateCheck.Fragments(body.Length);
             int frag = _videoOffset / PictureContract.FragPayload;
             int payload = Math.Min(PictureContract.FragPayload, body.Length - _videoOffset);
             if (payload < 1)
+                break;
+            // O device reserva frag_count * 1456 ao abrir o body. Começar sem isso vira salto até o próximo keyframe.
+            if (_videoOffset == 0 && !RingFits(fragCount * PictureContract.FragPayload, free, expect))
                 break;
             if (!CanSend(payload, free, expect))
                 break;
@@ -373,52 +369,58 @@ sealed class Pump : IHostedService
 
     bool CanSend(int payload, uint free, uint expect)
     {
-        if (expect > _videoSeq)
+        if (!RingFits(payload, free, expect))
             return false;
-        if (_videoSeq - expect >= Session.SeqWindow)
+        long outstanding = Outstanding(expect);
+        return outstanding + payload <= Session.FlightBytes;
+    }
+
+    bool RingFits(int bytes, uint free, uint expect)
+    {
+        if (expect > _videoSeq || _videoSeq - expect >= Session.SeqWindow)
             return false;
-        long acked = expect == _videoSeq ? _sentBody : _bodyBefore[expect & (Session.SeqWindow - 1)];
-        long outstanding = _sentBody - acked;
+        long outstanding = Outstanding(expect);
         if (outstanding < 0)
             return false;
-        uint budget = free < (uint)Session.FlightBytes ? free : (uint)Session.FlightBytes;
-        return outstanding + payload <= budget;
+        return outstanding + bytes <= free;
+    }
+
+    long Outstanding(uint expect)
+    {
+        long acked = expect == _videoSeq ? _sentBody : _bodyBefore[expect & (Session.SeqWindow - 1)];
+        return _sentBody - acked;
     }
 
     bool SendAudio(W154Movie movie, IPEndPoint ep, uint playFrame)
     {
         int rate = movie.Audio.SampleRate;
         int samples = movie.Audio.PcmBytes / 2;
+        if (samples < 1)
+            return false;
         long targetUs = (long)playFrame * movie.FrameUs + Session.AudioLeadUs;
         long target = (targetUs * rate) / 1_000_000L;
-        if (target > samples)
-            target = samples;
         bool sent = false;
         ReadOnlySpan<byte> pcm = movie.Pcm;
-        while (_audioSample < target)
+        int packets = 0;
+        while (_audioSample < target && packets < Session.AudioPacketsPerTurn)
         {
-            int bytes = (int)Math.Min(PictureContract.FragPayload, (target - _audioSample) * 2);
+            int at = (int)(_audioSample % samples);
+            int room = (samples - at) * 2;
+            int bytes = (int)Math.Min(PictureContract.FragPayload, Math.Min((long)room, (target - _audioSample) * 2));
             bytes &= ~1;
             if (bytes < 2)
                 break;
-            int offset = _audioSample * 2;
             ulong timeUs = (ulong)_audioSample * 1_000_000UL / (ulong)rate;
-            WriteAudio(_tx, _audioSeq, (uint)timeUs, pcm.Slice(offset, bytes));
+            WriteAudio(_tx, _audioSeq, (uint)timeUs, pcm.Slice(at * 2, bytes));
             if (!Send(_tx, PictureContract.FragHeader + bytes, ep))
                 break;
             _audioSample += bytes / 2;
             _audioSeq++;
+            packets++;
             sent = true;
         }
 
         return sent;
-    }
-
-    bool AudioCaughtUp(W154Movie movie)
-    {
-        if (!movie.Audio.Present)
-            return true;
-        return _audioSample >= movie.Audio.PcmBytes / 2;
     }
 
     void ZeroCursors()
@@ -429,7 +431,6 @@ sealed class Pump : IHostedService
         _videoOffset = 0;
         _audioSeq = 0;
         _audioSample = 0;
-        _eosSent = false;
         Array.Clear(_bodyBefore);
         lock (_gate)
         {

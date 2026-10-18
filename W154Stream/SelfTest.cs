@@ -39,6 +39,12 @@ static class SelfTest
                 Check(offset == body.Length, "body coberto");
             }
 
+            string? byName = Catalog.Resolve(Path.GetDirectoryName(path)!, Path.GetFileName(path));
+            Check(string.Equals(byName, path, StringComparison.OrdinalIgnoreCase), "nome no dir");
+            Check(Catalog.Resolve(Path.GetTempPath(), ".." + Path.DirectorySeparatorChar + "x.w154") is null, "recusa ..");
+            Check(string.Equals(Catalog.Resolve(Path.GetTempPath(), path), path, StringComparison.OrdinalIgnoreCase), "caminho absoluto");
+            Check(!string.IsNullOrEmpty(Environment.ProcessPath) && Catalog.Resolve(Path.GetTempPath(), Environment.ProcessPath) is null, "absoluto que não é w154");
+            Check(Catalog.Resolve(Path.GetTempPath(), Path.Combine(Path.GetTempPath(), "ausente.w154")) is null, "absoluto ausente");
             Check(RateCheck.Fragments(key.Length) == 41, "keyframe cru em 41 frags");
             Check(seq == 42, "seq atravessa os dois quadros");
             Console.WriteLine("selftest ok");

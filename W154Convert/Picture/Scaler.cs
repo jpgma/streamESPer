@@ -2,7 +2,7 @@ namespace W154Convert;
 
 static class Scaler
 {
-    public static ushort[] ToRgb565(ReadOnlySpan<byte> rgb, int width, int height, FitMode fit)
+    public static byte[] ToSquareRgb24(ReadOnlySpan<byte> rgb, int width, int height, FitMode fit)
     {
         if (width <= 0 || height <= 0 || rgb.Length < width * height * 3)
             throw new W154Exception("quadro RGB24 inválido.");
@@ -12,7 +12,12 @@ static class Scaler
             Cover(rgb, width, height, square);
         else
             Contain(rgb, width, height, square);
+        return square;
+    }
 
+    public static ushort[] ToRgb565(ReadOnlySpan<byte> rgb, int width, int height, FitMode fit)
+    {
+        byte[] square = ToSquareRgb24(rgb, width, height, fit);
         var dst = new ushort[PictureContract.Pixels];
         for (int i = 0; i < PictureContract.Pixels; i++)
         {

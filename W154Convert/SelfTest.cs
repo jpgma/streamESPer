@@ -11,6 +11,7 @@ static class SelfTest
         CheckLz4();
         CheckRate();
         CheckFit();
+        CheckPalette();
         CheckProgress();
         CheckFile();
         CheckAudio();
@@ -121,6 +122,125 @@ static class SelfTest
         Check(covered[239] == Rgb565.Pack(0, 255, 0), "cover recorta a direita do quadrado");
     }
 
+    static void CheckPalette()
+    {
+        ColorSpace.Expand565(0xFFFF, out byte whiteR, out byte whiteG, out byte whiteB);
+        Check(whiteR == 255 && whiteG == 255 && whiteB == 255, "branco RGB565 expande para 255");
+        ColorSpace.Oklab(0, out float blackL, out float blackA, out float blackB);
+        Check(MathF.Abs(blackL) < 1e-5f && MathF.Abs(blackA) < 1e-5f && MathF.Abs(blackB) < 1e-5f, "preto em OKLab é 0");
+        ColorSpace.Oklab(0xFFFF, out float whiteL, out _, out _);
+        Check(whiteL > 0.99f && whiteL < 1.01f, "branco em OKLab tem L perto de 1");
+
+        var few = new byte[PictureContract.Pixels * 3];
+        for (int i = 0; i < PictureContract.Pixels; i++)
+        {
+            ColorSpace.Expand565((ushort)(i % 200), out byte r, out byte g, out byte b);
+            int p = i * 3;
+            few[p] = r;
+            few[p + 1] = g;
+            few[p + 2] = b;
+        }
+
+        Palette exact = Quantizer.Build([few], reserveBlack: false, previous: null);
+        byte[] exactIndex = IndexMap.Map(few, exact, DitherMode.None);
+        bool lossless = exact.Count == 200;
+        for (int i = 0; lossless && i < PictureContract.Pixels; i++)
+            lossless = exact.Entries[exactIndex[i]] == (ushort)(i % 200);
+        Check(lossless, "até 256 cores mapeiam o RGB565 exato");
+
+        byte[] gradient = Gradient();
+        Palette reduced = Quantizer.Build([gradient], reserveBlack: false, previous: null);
+        var used = new HashSet<ushort>();
+        for (int i = 0; i < reduced.Count; i++)
+            used.Add(reduced.Entries[i]);
+        byte[] mapped = IndexMap.Map(gradient, reduced, DitherMode.None);
+        double sse = 0;
+        for (int i = 0; i < PictureContract.Pixels; i++)
+        {
+            int p = i * 3;
+            ushort src = Rgb565.Pack(gradient[p], gradient[p + 1], gradient[p + 2]);
+            sse += ColorSpace.Distance(src, reduced.Entries[mapped[i]]);
+        }
+
+        double average = sse / PictureContract.Pixels;
+        string averageText = average.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture);
+        Check(used.Count == 256, "degradê usa 256 entradas");
+        Check(average < 0.01, "erro médio OKLab do degradê (" + averageText + ") abaixo de 0,01");
+
+        ColorSpace.Expand565(0x1234, out byte flatR, out byte flatG, out byte flatB);
+        var flat = new byte[PictureContract.Pixels * 3];
+        for (int i = 0; i < PictureContract.Pixels; i++)
+        {
+            int p = i * 3;
+            flat[p] = flatR;
+            flat[p + 1] = flatG;
+            flat[p + 2] = flatB;
+        }
+
+        Palette flatPalette = Quantizer.Build([flat], reserveBlack: false, previous: null);
+        byte[] diffused = IndexMap.Map(flat, flatPalette, DitherMode.Fs);
+        bool quiet = true;
+        for (int i = 1; quiet && i < diffused.Length; i++)
+            quiet = diffused[i] == diffused[0];
+        Check(quiet, "Floyd-Steinberg em cor chapada não espalha ruído");
+
+        ushort[] gradient565 = PackRgb(gradient);
+        string path = Path.Combine(Path.GetTempPath(), "w154-palette-" + Guid.NewGuid().ToString("N") + ".w154");
+        try
+        {
+            int[] ordered = Converter.EncodeFrames([gradient565, gradient565], 2, contain: false, DitherMode.Ordered, path);
+            Check(ordered.Length == 2 && ordered[1] == PictureContract.MinBodyBytes, "dither ordenado repete o quadro parado");
+
+            Converter.EncodeFrames([gradient565, gradient565, gradient565, gradient565], 2, contain: false, DitherMode.None, path);
+            byte[] file = File.ReadAllBytes(path);
+            Check(ReadPalette(file, 0).AsSpan().SequenceEqual(ReadPalette(file, 2)), "GOPs iguais repetem a paleta");
+        }
+        finally
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    static byte[] Gradient()
+    {
+        var rgb = new byte[PictureContract.Pixels * 3];
+        for (int y = 0; y < PictureContract.Height; y++)
+        {
+            for (int x = 0; x < PictureContract.Width; x++)
+            {
+                int p = ((y * PictureContract.Width) + x) * 3;
+                rgb[p] = (byte)(x * 255 / 239);
+                rgb[p + 1] = (byte)(y * 255 / 239);
+                rgb[p + 2] = (byte)((x + y) * 255 / 478);
+            }
+        }
+
+        return rgb;
+    }
+
+    static ushort[] PackRgb(byte[] rgb)
+    {
+        var frame = new ushort[PictureContract.Pixels];
+        for (int i = 0; i < frame.Length; i++)
+        {
+            int p = i * 3;
+            frame[i] = Rgb565.Pack(rgb[p], rgb[p + 1], rgb[p + 2]);
+        }
+
+        return frame;
+    }
+
+    static ushort[] ReadPalette(byte[] file, int frame)
+    {
+        int at = PictureContract.HeaderSize + (frame * 4);
+        int palette = (int)ReadU32(file, at) + 4 + 8;
+        var entries = new ushort[PictureContract.PaletteColors];
+        for (int i = 0; i < entries.Length; i++)
+            entries[i] = (ushort)(file[palette + (i * 2)] | (file[palette + (i * 2) + 1] << 8));
+        return entries;
+    }
+
     static void CheckProgress()
     {
         string start = ConvertProgress.FormatLine(0, 100, TimeSpan.Zero, 80, final: false);
@@ -156,7 +276,7 @@ static class SelfTest
         string path = Path.Combine(Path.GetTempPath(), "w154-selftest-" + Guid.NewGuid().ToString("N") + ".w154");
         try
         {
-            int[] lengths = Converter.EncodeFrames([first, dirty, third, still], 2, contain: false, dither: false, path);
+            int[] lengths = Converter.EncodeFrames([first, dirty, third, still], 2, contain: false, DitherMode.None, path);
             Check(lengths.Length == 4, "arquivo sintético tem 4 quadros");
             int[] verified = W154File.Verify(path);
             Check(verified.AsSpan().SequenceEqual(lengths), "verify relê os mesmos bodies");
@@ -180,7 +300,7 @@ static class SelfTest
             File.Delete(broken);
 
             string contained = path + ".contain.w154";
-            Converter.EncodeFrames([first], 24, contain: true, dither: false, contained);
+            Converter.EncodeFrames([first], 24, contain: true, DitherMode.None, contained);
             byte[] containBytes = File.ReadAllBytes(contained);
             int palette = 32 + 4 + 4 + 8;
             ushort entry0 = (ushort)(containBytes[palette] | (containBytes[palette + 1] << 8));
@@ -216,7 +336,7 @@ static class SelfTest
         try
         {
             using (var stream = new MemoryStream(pcm, writable: false))
-                Converter.EncodeFrames([frame], 24, contain: false, dither: false, path, stream, 48000);
+                Converter.EncodeFrames([frame], 24, contain: false, DitherMode.None, path, stream, 48000);
 
             byte[] file = File.ReadAllBytes(path);
             uint audioOffset = ReadU32(file, 28);
@@ -228,7 +348,7 @@ static class SelfTest
             var head = new byte[4];
             pcm.AsSpan(0, 4).CopyTo(head);
             using (var shortPcm = new MemoryStream(head))
-                Converter.EncodeFrames([frame], 24, contain: false, dither: false, padded, shortPcm, 48000);
+                Converter.EncodeFrames([frame], 24, contain: false, DitherMode.None, padded, shortPcm, 48000);
             byte[] padFile = File.ReadAllBytes(padded);
             int padAt = (int)ReadU32(padFile, 28) + AudioPcm.HeaderBytes;
             Check(padFile.AsSpan(padAt, 4).SequenceEqual(head), "PCM curto preserva o início");
@@ -240,7 +360,7 @@ static class SelfTest
             pcm.CopyTo(longPcm, 0);
             longPcm[^1] = 0xFF;
             using (var longStream = new MemoryStream(longPcm))
-                Converter.EncodeFrames([frame], 24, contain: false, dither: false, trimmed, longStream, 48000);
+                Converter.EncodeFrames([frame], 24, contain: false, DitherMode.None, trimmed, longStream, 48000);
             byte[] trimFile = File.ReadAllBytes(trimmed);
             Check(trimFile.Length == file.Length && trimFile[^1] == pcm[^1], "PCM longo é cortado");
             File.Delete(trimmed);

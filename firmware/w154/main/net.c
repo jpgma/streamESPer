@@ -238,6 +238,7 @@ void net_task(void *arg)
         }
         struct timeval tv = {.tv_sec = 0, .tv_usec = 20000};
         int ready = select(maxfd + 1, &set, NULL, NULL, &tv);
+        int got_video = 0;
         if (ready > 0 && FD_ISSET(s_control, &set)) {
             for (;;) {
                 int n = recv(s_control, buf, sizeof(buf), MSG_DONTWAIT);
@@ -257,6 +258,7 @@ void net_task(void *arg)
                 }
                 if (n > SESSION_BYTES) {
                     on_video(buf, n);
+                    got_video = 1;
                 }
             }
         }
@@ -270,9 +272,10 @@ void net_task(void *arg)
             }
         }
         int64_t now = esp_timer_get_time();
-        if (now >= next_credit) {
+        /* Cada rajada libera a janela de 20 datagramas. Sem isso o host só anda a cada 20 ms. */
+        if (got_video || now >= next_credit) {
             send_credit();
-            next_credit = now + 20000;
+            next_credit = now + 10000;
         }
         if (now >= next_hello) {
             send_hello();

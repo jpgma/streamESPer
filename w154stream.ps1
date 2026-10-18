@@ -100,6 +100,37 @@ function Get-FlagValue([string[]]$argv, [string]$name, [int]$default) {
     return $default
 }
 
+function Stop-RunningInstances([int]$httpPort) {
+    $targets = @(Get-CimInstance Win32_Process | Where-Object {
+        if ($_.ProcessId -eq $PID) {
+            return $false
+        }
+        if ($_.Name -eq "w154stream.exe") {
+            return $true
+        }
+        return [string]$_.CommandLine -match '(?i)w154stream\.ps1'
+    })
+    foreach ($proc in $targets) {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        $alive = @(Get-Process -Name w154stream -ErrorAction SilentlyContinue)
+        $listening = $false
+        foreach ($line in @(netstat -ano -p tcp)) {
+            if ($line -match ":$httpPort\s+\S+\s+LISTENING") {
+                $listening = $true
+                break
+            }
+        }
+        if ($alive.Count -eq 0 -and -not $listening) {
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+    throw "Não foi possível encerrar a API que já escuta a porta $httpPort."
+}
+
 function Read-Secret([string]$text, [string]$name) {
     $match = [regex]::Match($text, "(?m)^#define\s+$name\s+`"([^`"]*)`"")
     if (-not $match.Success) {
@@ -151,6 +182,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($ssid)) {
         throw "wifi_secrets.h precisa de WIFI_SSID."
     }
+    Stop-RunningInstances (Get-FlagValue $ApiArgs "--http" 5090)
     $pass = [guid]::NewGuid().ToString()
 
     $drivers = (& netsh wlan show drivers | Out-String)

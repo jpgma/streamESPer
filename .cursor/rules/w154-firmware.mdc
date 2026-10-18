@@ -16,10 +16,12 @@ Player do painel Waveshare. C, sem C++. Comentário em pt-BR no formato `[fn] o 
 - O painel sai por `spi_device_polling_transmit` (CASET `0x2A`, RASET `0x2B`, RAMWR `0x2C`). Sem contagem de DMA em voo por cima de `draw_bitmap`: isso trava o present depois de ~10 s a 24 fps.
 - `free_bytes` é a cauda livre. Fila vazia anuncia o ring inteiro. Não descontar os bytes que ainda faltam no body parcial.
 - Dois quadros indexados. Publicação por índice atômico, sem fila de frames.
-- Underrun pausa o relógio, desliga o I2S na hora e continua recebendo. Sem o próximo quadro por 300 ms, ou sem IP, a tela fica preta com a marca piscando e o PA desce. Pause e eos não usam essa tela. Buraco de `seq` descarta até o próximo keyframe.
+- O relógio só solta com cerca de 3 s de bodies no ring (24–72 quadros) e para de novo abaixo de 8, até essa folga voltar. A conta é `ring_queued` mais os dois slots. Não use `ring_diag` para isso: ele zera o contador de salto. Credit sai depois de cada rajada de vídeo e no máximo a cada 10 ms. A janela no ar continua em 20 datagramas.
+- `begin_slot` reserva `frag_count * 1456` contíguos. Sem isso o log `video seq N esperava N` é recusa de slot, e `skip_key` descarta até o próximo keyframe. Buraco de UDP mostra dois `seq` diferentes.
+- Underrun pausa o relógio, desliga o I2S na hora e continua recebendo. Sem nenhum body por 300 ms, ou sem IP, a tela fica preta com a marca piscando e o PA desce. Rebuffer com dado na fila não usa essa tela. Pause e eos também não. Buraco de `seq` descarta até o próximo keyframe.
 - Áudio: PCM mono de 400 ms na DRAM interna. PA do GPIO7 no pause, no reset, sem IP, com o backlight apagado e na marca de desconexão. Sem ES7210.
 
 ## Rede
 
-- `wifi_secrets.h` não entra no git. A API lê o SSID desse arquivo. Cada lançamento gera um UUID como senha. `flash.bat` regrava o header com o hotspot que está no ar.
+- `wifi_secrets.h` não entra no git. A API lê o SSID desse arquivo. Cada lançamento gera um UUID como senha. `flash.bat` regrava o header com o hotspot que está no ar. Light sleep apaga o USB-JTAG: deixa de haver `VID_303A`, e `-Port` não recupera uma porta que não enumerou. O PWR acorda o chip.
 - Datagramas de vídeo e áudio como em `docs/formato-w154.md`. Sessão como em `docs/api-w154.md`.
